@@ -77,3 +77,20 @@ Steps:
 3. Traverse controls by keyboard and inspect focus, labels, and touch targets
 
 Expected: The sync failure is persistently available with a contextual recovery action, failed discovery grants no authorization, navigation and dialogs fit at 375px, controls have visible focus and accessible names, status is not conveyed by color alone, and no cancellation is shown as verified without provider evidence.
+
+## Test 6 - Canva Guided cancellation and independent Gmail evidence
+Viewport: desktop (1280x800) and mobile (375x667)
+Covers: truthful provider tier, explicit authorization, Action Required, user/provider evidence boundary, Gmail authentication checks, ambiguity guard, job revocation
+Description: Verifies a Guided provider workflow never becomes Autopilot or Verified Cancellation from a customer self-report and accepts only narrow authenticated provider evidence.
+
+Steps:
+1. Add or discover a Canva trial and explicitly choose Protect.
+2. Execute the due cancellation path.
+3. Confirm it becomes persistent Action Required, is labeled Guided, and links to Canva's official cancellation instructions. Confirm it is never labeled Autopilot.
+4. Select "I completed the provider steps".
+5. Confirm the item remains unverified and the activity timeline records a USER ACTION only.
+6. Sync connected Gmail with no authenticated Canva confirmation and confirm the state remains CANCELLATION_NEEDS_USER.
+7. Verify that a spoofed sender, failed/missing Canva DKIM identity, instructional email, email predating Protect authorization, or ambiguous match across multiple eligible Canva items cannot mark a cancellation verified.
+8. With one eligible protected Canva item and a later real Canva confirmation whose Gmail Authentication-Results show passing Canva DKIM, sync again.
+
+Expected: Exactly one item becomes CANCELED_CONFIRMED; remaining scheduled jobs are revoked; the timeline labels the evidence PROVIDER RESULT; a persistent success notification appears; only the message/thread reference, normalized evidence timestamp, and verification status are retained; no complete email body is stored or returned.

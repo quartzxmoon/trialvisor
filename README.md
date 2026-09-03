@@ -47,7 +47,7 @@ Implementation boundaries and the future status-page gate are documented in `doc
 ## Current launch gates
 
 - Complete one controlled real-mailbox Gmail detection and verify persistence/rendering.
-- Replace the demonstrative Tier 1 cancellation result with real provider adapters and independent verification.
+- Complete the real-world validation gate for the deployed Canva Guided workflow and Gmail-authenticated confirmation evidence; keep Canva out of Autopilot because the customer still performs the provider action.
 - Configure Microsoft OAuth and validate Microsoft Graph discovery.
 - Attach Stripe test credentials and Price IDs, configure the signed webhook endpoint, and complete Checkout/Portal end-to-end validation.
 - Publish final privacy policy, terms, data-retention policy, support process, and incident-response runbook.
