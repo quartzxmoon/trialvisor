@@ -1,0 +1,76 @@
+# Tests
+
+## Test 1 - First-time onboarding reaches a protection center [sanity]
+Viewport: desktop (1280x800)
+Covers: AppDeploy authentication, bounded authenticated startup, recoverable dashboard loading, Trialvisor account initialization, resumable onboarding, branded landing, first-visit guidance
+Description: Verifies the first-run path is branded, secure, persistent, and does not confuse Trialvisor authentication with connected inbox authorization.
+
+Steps:
+1. Sign in with a new Trialvisor identity
+2. Review the Welcome setup screen and refresh the page
+3. Continue to the dashboard without connecting an inbox
+
+Expected: The user sees the Trialvisor logo and onboarding until explicitly continuing, then reaches What could charge me next; an authenticated reload shows a branded loading state without rendering incomplete dashboard data, load failure offers Retry and Sign out controls within 15 seconds, returning users do not repeat signup, and first-visit guidance does not spam.
+
+## Test 2 - Manual discovery review requires explicit Protect
+Viewport: desktop (1280x800)
+Covers: manual trial creation, review-only state, Safe Cancel Deadline display, Protect confirmation, authorization persistence
+Description: Verifies a manually added trial becomes reviewable but cannot gain cancellation authority until the user confirms Protect.
+
+Steps:
+1. Add a manual trial for Canva Pro at $14.99 per month with a future trial end date
+2. Open the Protect flow and review the Safe Cancel Deadline, annualized cost, planned action, and cancellation tier
+3. Select Protect this trial and refresh
+
+Expected: The trial moves from Protection Needed to protected only after the explicit confirmation, the authorization remains after refresh, and first-Protect guidance is shown at most once.
+
+## Test 3 - Keep and cancellation decisions stay neutral and durable
+Viewport: desktop (1280x800)
+Covers: protected-trial decision UX, KEEP path, scheduled cancellation revocation, duplicate-execution guardrail
+Description: Verifies the decision surface presents Keep service and Cancel as planned neutrally and preserves the selected state.
+
+Setup:
+1. Add and protect a manual trial through the UI
+
+Steps:
+1. Open Review decision
+2. Select Keep service
+3. Refresh the dashboard and inspect Protection history
+
+Expected: The service is marked Kept, scheduled cancellation is revoked, the choice remains visible in history, and no cancellation action is presented as completed.
+
+## Test 4 - Connected Google account shows bounded discovery validation state
+Viewport: desktop (1280x800)
+Covers: Google OAuth connection state, bounded Gmail sync, incremental checkpoint fallback search, deduplication, real-mailbox validation status
+Description: Verifies Gmail synchronization remains privacy-minimized, avoids unnecessary full rescans after an unchanged history checkpoint, and does not claim real discovery verification without a persisted matched mailbox finding.
+
+Steps:
+1. Connect Google through production OAuth
+2. Select Sync from Connected accounts
+3. Review the discovery validation message and sync again
+
+Expected: Connection identity and last sync remain visible, an unchanged incremental sync visibly reports that Gmail supplied no new messages without repeating the two-year search, repeated sync does not duplicate findings, and the UI shows the controlled test-message instructions while real mailbox discovery remains pending.
+
+## Test 5 - Mobile protection flow remains usable during provider failure
+Viewport: mobile (375x667)
+Covers: responsive navigation, mobile discovery review, accessible modal behavior, persistent critical error state, Gmail provider failure safety
+Description: Verifies critical protection controls remain reachable on phone and a failed inbox sync cannot change authorization state.
+
+QA Faults:
+```json
+[
+  {
+    "method": "POST",
+    "path": "/api/gmail/sync",
+    "status": 503,
+    "body_json": { "error": "gmail_temporarily_unavailable" }
+  }
+]
+```
+
+Steps:
+1. Open mobile navigation and select Connected accounts
+2. Select Sync for Google
+3. Return to Protection center and review an existing trial
+
+Expected: A persistent visible error is shown, navigation and modal controls remain usable at 375px width, and no trial gains Protect authorization because of the failed sync.

@@ -1,0 +1,27 @@
+# Dependencies and build output
+node_modules/
+dist/
+.vite/
+coverage/
+
+# Local tooling
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.log
+
+# Secrets and local environment files
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+
+# AppDeploy/Stripe local state
+.appdeploy/
+.stripe/
+

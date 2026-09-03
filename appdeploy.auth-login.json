@@ -1,0 +1,17 @@
+{
+  "methods": [
+    "google",
+    "apple"
+  ],
+  "headline": "Welcome to Trialvisor",
+  "subtitle": "Free trials. Under control.",
+  "style": {
+    "mode": "light",
+    "accentColor": "#1769e0",
+    "backgroundColor": "#f4f7fb",
+    "panelColor": "#ffffff",
+    "textColor": "#071b3d",
+    "fontFamily": "DM Sans, system-ui, sans-serif",
+    "borderRadius": 16
+  }
+}

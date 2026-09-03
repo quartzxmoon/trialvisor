@@ -1,0 +1,42 @@
+# Trialvisor
+
+Trialvisor is a free-trial protection SaaS. It discovers trial and subscription signals, keeps discovery separate from cancellation authority, schedules explicitly authorized actions, and records evidence only after cancellation is verified.
+
+## Production
+
+- AppDeploy app ID: `trialvisor-m8vrsu`
+- Production URL: <https://trialvisor-m8vrsu.v2.appdeploy.ai/>
+- Baseline snapshot: `1788407717958`
+- Figma source of truth: <https://www.figma.com/design/bEVDjkOG5a6zYvE0iaHtEa>
+
+This repository is a secret-free copy of the AppDeploy production source. AppDeploy remains the application runtime and deployment source of truth until an automated, verified repository-to-AppDeploy release workflow is established.
+
+## Product invariants
+
+- Inbox detection creates `REVIEW_REQUIRED` findings only.
+- `PROTECT` is an explicit, tenant-scoped cancellation authorization.
+- Cancellation jobs are durable and execute server-side.
+- Provider completion is not treated as success until independently verified.
+- Connected-inbox tokens remain backend-only and encrypted at rest.
+- Retained Gmail data is limited to normalized signals and necessary message/thread references; full message bodies are not stored.
+
+## Local validation
+
+```sh
+npm install
+npm run typecheck
+```
+
+`@appdeploy/client` is injected by AppDeploy during its production build and is deliberately not installed from npm. The repository includes an ambient type declaration for local type validation; AppDeploy deployment QA is the authoritative bundle and runtime test.
+
+The production-facing QA scenarios are documented in `tests/tests.txt`. They are executed by AppDeploy after deployment and cover onboarding, explicit Protect authorization, Keep/Cancel decisions, Gmail discovery safety, and responsive provider-failure behavior.
+
+## Current launch gates
+
+- Complete one controlled real-mailbox Gmail detection and verify persistence/rendering.
+- Replace the demonstrative Tier 1 cancellation result with real provider adapters and independent verification.
+- Configure Microsoft OAuth and validate Microsoft Graph discovery.
+- Configure Stripe Checkout, signed webhooks, server-enforced entitlements, and Customer Portal.
+- Publish final privacy policy, terms, data-retention policy, support process, and incident-response runbook.
+
+See `docs/configuration.md` and `docs/deployment.md` before changing production.
