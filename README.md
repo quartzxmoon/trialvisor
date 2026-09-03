@@ -6,7 +6,7 @@ Trialvisor is a free-trial protection SaaS. It discovers trial and subscription 
 
 - AppDeploy app ID: `trialvisor-m8vrsu`
 - Production URL: <https://trialvisor-m8vrsu.v2.appdeploy.ai/>
-- Baseline snapshot: `1788407717958`
+- Baseline snapshot: `1788407961138`
 - Figma source of truth: <https://www.figma.com/design/bEVDjkOG5a6zYvE0iaHtEa>
 
 This repository is a secret-free copy of the AppDeploy production source. AppDeploy remains the application runtime and deployment source of truth until an automated, verified repository-to-AppDeploy release workflow is established.

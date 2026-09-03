@@ -54,7 +54,7 @@ Expected: Connection identity and last sync remain visible, an unchanged increme
 ## Test 5 - Mobile protection flow remains usable during provider failure
 Viewport: mobile (375x667)
 Covers: responsive navigation, mobile discovery review, accessible modal behavior, persistent critical error state, Gmail provider failure safety
-Description: Verifies critical protection controls remain reachable on phone and a failed inbox sync cannot change authorization state.
+Description: Verifies critical protection controls remain reachable on phone, a failed inbox sync cannot change authorization state, and an unsupported cancellation adapter cannot create a verified result.
 
 QA Faults:
 ```json
@@ -68,9 +68,12 @@ QA Faults:
 ]
 ```
 
+Setup:
+1. Add and protect a manual trial through the UI
+
 Steps:
 1. Open mobile navigation and select Connected accounts
 2. Select Sync for Google
-3. Return to Protection center and review an existing trial
+3. Return to Protection center, review the protected trial, and select Cancel as planned
 
-Expected: A persistent visible error is shown, navigation and modal controls remain usable at 375px width, and no trial gains Protect authorization because of the failed sync.
+Expected: A persistent Gmail error is shown, navigation and modal controls remain usable at 375px width, the failed sync grants no authorization, and cancellation moves to Action Required without verified evidence or confirmed savings because no production provider adapter is enabled.
