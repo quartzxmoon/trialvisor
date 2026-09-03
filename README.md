@@ -6,7 +6,7 @@ Trialvisor is a free-trial protection SaaS. It discovers trial and subscription 
 
 - AppDeploy app ID: `trialvisor-m8vrsu`
 - Production URL: <https://trialvisor-m8vrsu.v2.appdeploy.ai/>
-- Baseline snapshot: `1788408507917`
+- Applied snapshot: inspect AppDeploy version history before each release; do not rely on a stale hard-coded identifier.
 - Figma source of truth: <https://www.figma.com/design/bEVDjkOG5a6zYvE0iaHtEa>
 
 This repository is a secret-free copy of the AppDeploy production source. AppDeploy remains the application runtime and deployment source of truth until an automated, verified repository-to-AppDeploy release workflow is established.
@@ -20,6 +20,8 @@ This repository is a secret-free copy of the AppDeploy production source. AppDep
 - Connected-inbox tokens remain backend-only and encrypted at rest.
 - Retained Gmail data is limited to normalized signals and necessary message/thread references; full message bodies are not stored.
 - Gmail discovery uses bounded focused searches for initial/validation runs, paginated incremental history after checkpoints, versioned candidate reprocessing, and thread/provider/date deduplication. Every match remains `REVIEW_REQUIRED`.
+- Stripe Checkout and Customer Portal remain backend-created; Pro entitlement is webhook-authoritative, globally tenant/customer-bound by Checkout completion, Price-allowlisted, replay-aware, and disabled until all test-mode secrets are attached.
+- Billing changes must never silently cancel or abandon an already-authorized protection obligation.
 
 ## Local validation
 

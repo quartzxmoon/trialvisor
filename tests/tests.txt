@@ -25,21 +25,22 @@ Steps:
 
 Expected: The finding begins in REVIEW_REQUIRED; its timeline distinguishes user action, Trialvisor action, and provider result. Protection activates only after explicit confirmation. Protection and notice read state persist after refresh, while critical entries remain available.
 
-## Test 3 - Neutral decisions, Data Controls, and safe feedback
+## Test 3 - Neutral decisions, billing boundaries, Data Controls, and safe feedback
 Viewport: desktop (1280x800)
-Covers: KEEP path, durable scheduling revocation, data export, data-retention explanation, contextual feedback, guarded account deletion
-Description: Verifies customer controls are understandable and cannot leak sensitive provider credentials.
+Covers: KEEP path, durable scheduling revocation, Plan and billing configuration gate, server-side entitlement display, data export, data-retention explanation, contextual feedback, guarded account deletion
+Description: Verifies customer and billing controls are understandable and cannot leak sensitive provider credentials or grant paid access from a browser redirect.
 
 Setup:
 1. Add and protect a manual trial through the UI
 
 Steps:
 1. Select Keep service and refresh
-2. Open Settings and review Accessed, Processed, Stored, and Retained explanations
-3. Download the account export and submit an incorrect-date report
-4. Open account deletion and cancel before final confirmation
+2. Open Plan and billing and confirm the current entitlement and configuration state
+3. Open Settings and review Accessed, Processed, Stored, and Retained explanations
+4. Download the account export and submit an incorrect-date report
+5. Open account deletion and cancel before final confirmation
 
-Expected: Keep is durable and revokes scheduled cancellation. Export contains normalized account records but no OAuth tokens, secrets, or full email bodies. Feedback stores safe object context only. Account deletion requires an explicit second confirmation and is not performed when canceled.
+Expected: Keep is durable and revokes scheduled cancellation. The billing screen does not claim unimplemented Free limits, Checkout remains unavailable until all required server secrets exist, and no query-string redirect grants Pro. Export contains normalized account records but no OAuth tokens, secrets, or full email bodies. Feedback stores safe object context only. Account deletion requires an explicit second confirmation and is not performed when canceled.
 
 ## Test 4 - Connected Google account uses bounded, review-only discovery
 Viewport: desktop (1280x800)

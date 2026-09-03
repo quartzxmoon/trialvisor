@@ -36,14 +36,16 @@ Pricing is a commercial decision. Keep the monthly and annual Prices attached to
 
    `https://api-v2.appdeploy.ai/app/trialvisor-m8vrsu/api/billing/webhook`
 
-3. Subscribe to:
+3. Set the endpoint API version to `2026-08-26.dahlia`, matching the deployed Stripe Node SDK. Do not leave the endpoint on an older account-default version.
+
+4. Subscribe to:
    - `checkout.session.completed`
    - `customer.subscription.created`
    - `customer.subscription.updated`
    - `customer.subscription.deleted`
    - `invoice.payment_failed`
-4. Save the endpoint.
-5. Reveal its `whsec_...` signing secret and store it only through AppDeploy private secret entry as `STRIPE_WEBHOOK_SECRET`.
+5. Save the endpoint.
+6. Reveal its `whsec_...` signing secret and store it only through AppDeploy private secret entry as `STRIPE_WEBHOOK_SECRET`.
 
 ## 5. Attach AppDeploy secrets
 
@@ -67,6 +69,15 @@ Never paste any of these values into chat, GitHub, Figma, logs, or frontend conf
 7. Trigger a failed sandbox payment and confirm a persistent billing state plus user notification.
 8. Confirm another Trialvisor tenant cannot access the customer or subscription.
 9. Repeat the complete test for the annual Price.
+
+## Deployed billing guardrails
+
+- The browser redirect never grants Pro. Only a signature-verified subscription event can change the server-side entitlement.
+- An active subscription grants Pro only when its Price ID matches one of the two configured Trialvisor Pro Prices.
+- A Stripe customer is globally bound to one Trialvisor tenant only by the completed, server-created Checkout session. Subscription events cannot create or cross that binding; an out-of-order subscription event is retried until its Checkout binding exists.
+- Duplicate events are recorded and ignored; older subscription events cannot overwrite a newer entitlement state.
+- Checkout creation is limited to one session per tenant per minute to reduce accidental duplicates and abuse.
+- Existing authorized cancellation jobs are not deleted or silently abandoned when billing changes. A future feature gate must distinguish blocking new paid actions from honoring already-authorized protection obligations.
 
 ## Tax safety
 
