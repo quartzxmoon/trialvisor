@@ -27,9 +27,22 @@ Microsoft access should request only the minimum read-only mail and offline-acce
 
 Use separate test and live credentials. Prefer a restricted API key with only the permissions required for Checkout Sessions, Customers, Subscriptions, and Billing Portal sessions. Webhook signatures must be verified before processing events. Stripe entitlement state must be derived server-side and must never trust a browser redirect alone.
 
+Stripe webhook URL:
+
+`https://api-v2.appdeploy.ai/app/trialvisor-m8vrsu/api/billing/webhook`
+
+Subscribe at minimum to:
+
+- `checkout.session.completed`
+- `customer.subscription.created`
+- `customer.subscription.updated`
+- `customer.subscription.deleted`
+- `invoice.payment_failed`
+
+The restricted key needs write access to Checkout Sessions and Billing Portal Sessions, and the minimum supporting Customer, Subscription, Product, and Price permissions required by Stripe for those flows. Configure the Customer Portal separately in Stripe test mode before exercising the portal route.
+
 Do not enable Stripe automatic tax until applicable registrations are active and the commercial tax decision has been reviewed.
 
 ## Public configuration
 
 Frontend responses may expose only derived booleans such as whether an integration is configured. They must never include credentials, OAuth tokens, encryption material, or webhook secrets.
-

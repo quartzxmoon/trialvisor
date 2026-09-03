@@ -7,12 +7,14 @@
         "dev": "vite",
         "build": "vite build",
         "preview": "vite preview",
-        "typecheck": "tsc --noEmit --noUnusedLocals false --noUnusedParameters false"
+        "typecheck": "tsc --noEmit --noUnusedLocals false --noUnusedParameters false",
+        "typecheck:billing": "tsc -p tsconfig.billing.json"
     },
     "dependencies": {
         "lucide-react": "^0.469.0",
         "react": "^19.0.0",
-        "react-dom": "^19.0.0"
+        "react-dom": "^19.0.0",
+        "stripe": "^22.6.1"
     },
     "optionalDependencies": {
         "@rollup/rollup-linux-x64-gnu": "^4.0.0"

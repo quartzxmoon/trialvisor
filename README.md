@@ -6,7 +6,7 @@ Trialvisor is a free-trial protection SaaS. It discovers trial and subscription 
 
 - AppDeploy app ID: `trialvisor-m8vrsu`
 - Production URL: <https://trialvisor-m8vrsu.v2.appdeploy.ai/>
-- Baseline snapshot: `1788407961138`
+- Baseline snapshot: `1788408507917`
 - Figma source of truth: <https://www.figma.com/design/bEVDjkOG5a6zYvE0iaHtEa>
 
 This repository is a secret-free copy of the AppDeploy production source. AppDeploy remains the application runtime and deployment source of truth until an automated, verified repository-to-AppDeploy release workflow is established.
@@ -36,7 +36,7 @@ The production-facing QA scenarios are documented in `tests/tests.txt`. They are
 - Complete one controlled real-mailbox Gmail detection and verify persistence/rendering.
 - Replace the demonstrative Tier 1 cancellation result with real provider adapters and independent verification.
 - Configure Microsoft OAuth and validate Microsoft Graph discovery.
-- Configure Stripe Checkout, signed webhooks, server-enforced entitlements, and Customer Portal.
+- Attach Stripe test credentials and Price IDs, configure the signed webhook endpoint, and complete Checkout/Portal end-to-end validation.
 - Publish final privacy policy, terms, data-retention policy, support process, and incident-response runbook.
 
-See `docs/configuration.md` and `docs/deployment.md` before changing production.
+See `docs/configuration.md`, `docs/deployment.md`, and `docs/stripe-setup.md` before changing production.

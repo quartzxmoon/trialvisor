@@ -24,10 +24,10 @@ Steps:
 
 Expected: The trial moves from Protection Needed to protected only after the explicit confirmation, the authorization remains after refresh, and first-Protect guidance is shown at most once.
 
-## Test 3 - Keep and cancellation decisions stay neutral and durable
+## Test 3 - Keep decisions and billing gates stay neutral and durable
 Viewport: desktop (1280x800)
-Covers: protected-trial decision UX, KEEP path, scheduled cancellation revocation, duplicate-execution guardrail
-Description: Verifies the decision surface presents Keep service and Cancel as planned neutrally and preserves the selected state.
+Covers: protected-trial decision UX, KEEP path, scheduled cancellation revocation, duplicate-execution guardrail, Stripe configuration gate, webhook-derived billing status
+Description: Verifies the decision surface preserves the selected state and paid access cannot activate before Stripe is fully configured and webhook-verified.
 
 Setup:
 1. Add and protect a manual trial through the UI
@@ -36,8 +36,9 @@ Steps:
 1. Open Review decision
 2. Select Keep service
 3. Refresh the dashboard and inspect Protection history
+4. Open Plan & billing
 
-Expected: The service is marked Kept, scheduled cancellation is revoked, the choice remains visible in history, and no cancellation action is presented as completed.
+Expected: The service is marked Kept, scheduled cancellation is revoked, the choice remains visible in history, no cancellation is presented as completed, the Free plan remains active, and paid checkout is disabled while Stripe secrets and prices are unconfigured.
 
 ## Test 4 - Connected Google account shows bounded discovery validation state
 Viewport: desktop (1280x800)
