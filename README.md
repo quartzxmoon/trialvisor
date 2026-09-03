@@ -19,6 +19,7 @@ This repository is a secret-free copy of the AppDeploy production source. AppDep
 - Provider completion is not treated as success until independently verified.
 - Connected-inbox tokens remain backend-only and encrypted at rest.
 - Retained Gmail data is limited to normalized signals and necessary message/thread references; full message bodies are not stored.
+- Gmail discovery uses bounded focused searches for initial/validation runs, paginated incremental history after checkpoints, versioned candidate reprocessing, and thread/provider/date deduplication. Every match remains `REVIEW_REQUIRED`.
 
 ## Local validation
 

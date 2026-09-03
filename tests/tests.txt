@@ -43,7 +43,7 @@ Expected: Keep is durable and revokes scheduled cancellation. Export contains no
 
 ## Test 4 - Connected Google account uses bounded, review-only discovery
 Viewport: desktop (1280x800)
-Covers: Google connection state, Gmail sync, provider-side search, incremental checkpoint, confidence, deduplication, persistent sync status
+Covers: Google connection state, Gmail sync, focused provider-side searches, HTML/plain-text parsing, versioned reprocessing, incremental history pagination and checkpoint fallback, confidence, deduplication, persistent sync status
 Description: Verifies privacy-minimized Gmail processing without overstating real-mailbox validation.
 
 Steps:
@@ -51,7 +51,7 @@ Steps:
 2. Select Sync from Connected Accounts
 3. Review the result, Notification Center, and any detected finding, then sync again
 
-Expected: Account identity and last sync remain visible. An unchanged history checkpoint avoids repeating a full search, processed messages store normalized signals and source references rather than full bodies, repeated sync does not duplicate findings, all findings remain REVIEW_REQUIRED, and no sync outcome grants cancellation authority. If no real message matches, the UI accurately says validation remains pending.
+Expected: Account identity and last sync remain visible. Until the first real match, the bounded validation search can reprocess candidates handled by an older parser version; after validation, incremental history avoids unnecessary full searches and paginates within the cap. HTML-only and plain-text candidates can produce HIGH, MEDIUM, or LOW results. Processed messages store normalized signals and source references rather than full bodies, repeated sync does not duplicate findings, all findings remain REVIEW_REQUIRED, and no sync outcome grants cancellation authority. The result states its search mode, counts, confidence mix, and whether deduplication prevented a new item.
 
 ## Test 5 - Mobile failure safety and accessible navigation
 Viewport: mobile (375x667)

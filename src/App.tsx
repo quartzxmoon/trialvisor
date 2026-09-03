@@ -27,7 +27,17 @@ function App(){
  const resetSignIn=async()=>{try{setBusy('reset');await auth.signOut();setSnap(null);setError('Sign-in session reset. Select Create secure account to try again.')}finally{setBusy('')}};
  const post=async(path:string,body:object={})=>{try{setBusy(path);setError('');const r=await api.post(path,body);await load();return r.data}catch(e){const message=(e as {response?:{data?:{error?:string;message?:string}}})?.response?.data?.error||(e as {response?:{data?:{message?:string}}})?.response?.data?.message;setError(message==='reconnect_required'||message==='google_not_connected'?'Gmail needs to be reconnected before Trialvisor can sync this inbox.':message?.startsWith('gmail_')?'Gmail could not complete the sync. Your existing findings and protection settings were not changed.':'That action could not be completed safely. Nothing was changed.');return null}finally{setBusy('')}};
  const connectGoogle=async()=>{try{setBusy('google');setError('');const r=await api.post('/api/oauth/google/start');window.location.assign(r.data.authorizationUrl)}catch{setError('Google connection could not start safely. Please try again.');setBusy('')}};
- const syncGoogle=async()=>{const r=await post('/api/gmail/sync');if(!r)return;if(r.created>0){const key='FIRST_SUCCESSFUL_INBOX_SYNC';const shown=snap?.account.guidanceShown||[];if(!shown.includes(key))showGuidance(key,'Sync complete. Trialvisor found subscription activity for you to review.');else setToast({key:'SYNC_RESULT',text:`Sync complete. ${r.created} new finding${r.created===1?'':'s'} added for review; nothing was protected automatically.`})}else setToast({key:'SYNC_RESULT',text:r.scanned>0?`Sync complete. ${r.scanned} bounded Gmail message reference${r.scanned===1?' was':'s were'} checked; no new trial or subscription signal was found.`:'Sync complete. Gmail reported no new messages since the last checkpoint.'})};
+ const syncGoogle=async()=>{
+  const r=await post('/api/gmail/sync');if(!r)return;
+  const confidence=r.confidence||{high:0,medium:0,low:0},summary=confidence.high+' high, '+confidence.medium+' medium, and '+confidence.low+' low confidence';
+  if(r.created>0){
+   const key='FIRST_SUCCESSFUL_INBOX_SYNC',shown=snap?.account.guidanceShown||[];
+   if(!shown.includes(key))showGuidance(key,'Sync complete. Trialvisor found subscription activity for you to review.');
+   else setToast({key:'SYNC_RESULT',text:'Sync complete. '+r.created+' new review-only finding'+(r.created===1?' was':'s were')+' added ('+summary+'). Nothing was protected automatically.'});
+  }else if(r.matched>0)setToast({key:'SYNC_RESULT',text:'Sync complete. '+r.matched+' subscription signal'+(r.matched===1?' was':'s were')+' recognized ('+summary+'), but existing thread/provider safeguards prevented duplicates.'});
+  else if(r.scanned>0)setToast({key:'SYNC_RESULT',text:'Sync complete using '+String(r.mode||'bounded discovery').replace(/_/g,' ')+'. '+r.scanned+' candidate message'+(r.scanned===1?' was':'s were')+' processed; none met the subscription-signal rules.'});
+  else setToast({key:'SYNC_RESULT',text:'Sync complete. Gmail reported no unprocessed candidate messages. Trialvisor kept all existing findings and protection authority unchanged.'});
+ };
  const openCheckout=async(cadence:'monthly'|'annual')=>{const r=await post('/api/billing/checkout',{cadence});if(r?.url)window.location.assign(r.url)};
  const openPortal=async()=>{const r=await post('/api/billing/portal');if(r?.url)window.location.assign(r.url)};
  const protect=async(t:Trial)=>{const r=await post('/api/trials/'+t.id+'/protect');setModal(null);if(r)showGuidance('FIRST_PROTECT_AUTHORIZATION',guidanceCopy.FIRST_PROTECT_AUTHORIZATION)};
