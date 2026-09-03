@@ -29,7 +29,17 @@ npm run typecheck
 
 `@appdeploy/client` is injected by AppDeploy during its production build and is deliberately not installed from npm. The repository includes an ambient type declaration for local type validation; AppDeploy deployment QA is the authoritative bundle and runtime test.
 
-The production-facing QA scenarios are documented in `tests/tests.txt`. They are executed by AppDeploy after deployment and cover onboarding, explicit Protect authorization, Keep/Cancel decisions, Gmail discovery safety, and responsive provider-failure behavior.
+The production-facing QA scenarios are documented in `tests/tests.txt`. They are executed by AppDeploy after deployment and cover public trust surfaces, onboarding, explicit Protect authorization, persistent notifications and activity, customer data controls, Gmail discovery safety, and responsive provider-failure behavior.
+
+## Trust and customer controls
+
+- Public lifecycle guide: `/how-it-works`
+- Security architecture and reporting: `/security` and `/contact/security`
+- Truthful provider capability directory: `/providers`
+- Confirmed production subprocessors: `/subprocessors`
+- Authenticated Notification Center, activity timeline, data export, feedback, disconnect, and guarded account deletion
+
+Implementation boundaries and the future status-page gate are documented in `docs/trust-data-controls.md` and `docs/system-status-readiness.md`.
 
 ## Current launch gates
 

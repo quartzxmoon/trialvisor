@@ -20,6 +20,7 @@ type BillingRecord={
 };
 
 const billingTable=(userId:string)=>'billing:'+userId;
+const billingNotice=async(userId:string,title:string,message:string,severity:'info'|'warning'|'critical'|'success')=>{await db.add('notifications:'+userId,[{userId,kind:'billing',title,message,severity,at:new Date().toISOString(),readAt:null,actionView:'billing'}])};
 const stripeClient=async()=>new Stripe(await secrets.readSecret('STRIPE_RESTRICTED_KEY'),{
   maxNetworkRetries:2,
   timeout:10000,
@@ -111,19 +112,21 @@ const applyStripeEvent=async(event:Stripe.Event)=>{
     const session=event.data.object as Stripe.Checkout.Session,userId=session.client_reference_id||session.metadata?.trialvisor_user_id;
     if(!userId)return;
     await saveBilling(userId,{customerId:safeId(session.customer,'cus_'),subscriptionId:safeId(session.subscription,'sub_'),status:'pending',plan:'FREE',cadence:session.metadata?.trialvisor_cadence==='annual'?'annual':'monthly'});
+    await billingNotice(userId,'Checkout completed','Trialvisor is waiting for Stripe’s signed subscription event before activating paid access.','info');
     return;
   }
   if(event.type==='customer.subscription.created'||event.type==='customer.subscription.updated'||event.type==='customer.subscription.deleted'){
     const subscription=event.data.object as Stripe.Subscription,userId=subscription.metadata?.trialvisor_user_id;
     if(!userId)return;
+    const prior=await currentBilling(userId);
     const price=subscription.items.data[0]?.price,cadence=price?.recurring?.interval==='year'?'annual':'monthly',active=ACTIVE_STATUSES.has(subscription.status);
     await saveBilling(userId,{customerId:safeId(subscription.customer,'cus_'),subscriptionId:subscription.id,status:subscription.status,plan:active?'PRO':'FREE',cadence,priceId:price?.id,currentPeriodEnd:periodEnd((subscription as unknown as {current_period_end?:number}).current_period_end),cancelAtPeriodEnd:subscription.cancel_at_period_end});
-    if(subscription.status==='past_due'||subscription.status==='unpaid')await notifications.send({userIds:[userId],notification:{title:'Billing action required',body:'Update your payment method to keep Trialvisor protection features active.'},data:{kind:'billing',status:subscription.status}});
+    if(prior?.status!==subscription.status){if(subscription.status==='past_due'||subscription.status==='unpaid'){await billingNotice(userId,'Billing action required','Update your payment method to keep Trialvisor protection features active.','critical');await notifications.send({userIds:[userId],notification:{title:'Billing action required',body:'Update your payment method to keep Trialvisor protection features active.'},data:{kind:'billing',status:subscription.status}})}else if(active)await billingNotice(userId,'Trialvisor Pro active','Paid access was activated only after Stripe’s signed subscription event was verified.','success');else if(event.type==='customer.subscription.deleted')await billingNotice(userId,'Paid plan ended','Trialvisor Pro is no longer active. Your retained account data remains available under the current free-plan rules.','warning')}
     return;
   }
   if(event.type==='invoice.payment_failed'){
     const invoice=event.data.object as unknown as {parent?:{subscription_details?:{metadata?:Record<string,string>}}},userId=invoice.parent?.subscription_details?.metadata?.trialvisor_user_id;
-    if(userId)await notifications.send({userIds:[userId],notification:{title:'Payment failed',body:'Trialvisor could not renew your paid plan. Open Plan & billing to update payment details.'},data:{kind:'billing',status:'past_due'}});
+    if(userId){await billingNotice(userId,'Payment failed','Trialvisor could not renew your paid plan. Open Plan & billing to update payment details.','critical');await notifications.send({userIds:[userId],notification:{title:'Payment failed',body:'Trialvisor could not renew your paid plan. Open Plan & billing to update payment details.'},data:{kind:'billing',status:'past_due'}})};
   }
 };
 

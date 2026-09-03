@@ -1,61 +1,62 @@
 # Tests
 
-## Test 1 - First-time onboarding reaches a protection center [sanity]
+## Test 1 - Public trust surfaces and first-time onboarding [sanity]
 Viewport: desktop (1280x800)
-Covers: AppDeploy authentication, bounded authenticated startup, recoverable dashboard loading, Trialvisor account initialization, resumable onboarding, branded landing, first-visit guidance
-Description: Verifies the first-run path is branded, secure, persistent, and does not confuse Trialvisor authentication with connected inbox authorization.
+Covers: public landing, How It Works, Security, Provider Support, Subprocessors, authentication, account initialization, resumable onboarding
+Description: Verifies that public education and trust pages are reachable without authentication, make the authorization boundaries explicit, and preserve first-run account setup.
 
 Steps:
-1. Sign in with a new Trialvisor identity
-2. Review the Welcome setup screen and refresh the page
-3. Continue to the dashboard without connecting an inbox
+1. Open the landing page and visit How It Works, Security, Provider Support, and Subprocessors from public navigation
+2. Confirm the lifecycle reads Connect, Discover, Review, Protect, Monitor, Decide, Cancel, Verify
+3. Sign in with a first-time Trialvisor identity, refresh during onboarding, then continue without connecting an inbox
 
-Expected: The user sees the Trialvisor logo and onboarding until explicitly continuing, then reaches What could charge me next; an authenticated reload shows a branded loading state without rendering incomplete dashboard data, load failure offers Retry and Sign out controls within 15 seconds, returning users do not repeat signup, and first-visit guidance does not spam.
+Expected: Public pages render without a session; they state that inbox connection and detection do not authorize cancellation, do not advertise any provider as Autopilot, list only confirmed production dependencies, and expose a security-reporting route. The new user resumes onboarding after refresh and reaches the protection center only after completing setup.
 
-## Test 2 - Manual discovery review requires explicit Protect
+## Test 2 - Review, Protect, notifications, and customer activity are durable
 Viewport: desktop (1280x800)
-Covers: manual trial creation, review-only state, Safe Cancel Deadline display, Protect confirmation, authorization persistence
-Description: Verifies a manually added trial becomes reviewable but cannot gain cancellation authority until the user confirms Protect.
+Covers: manual finding, REVIEW_REQUIRED, explicit Protect, Safe Cancel Deadline, persistent notifications, per-trial audit timeline
+Description: Verifies that detection remains separate from authorization and meaningful events survive navigation and refresh.
 
 Steps:
-1. Add a manual trial for Canva Pro at $14.99 per month with a future trial end date
-2. Open the Protect flow and review the Safe Cancel Deadline, annualized cost, planned action, and cancellation tier
-3. Select Protect this trial and refresh
+1. Add a manual Canva Pro trial at $14.99 per month with a future end date
+2. Open its activity timeline and Notification Center
+3. Open Protect, review the annualized cost and authorization language, and select Protect this trial
+4. Refresh, mark a notification read, and refresh again
 
-Expected: The trial moves from Protection Needed to protected only after the explicit confirmation, the authorization remains after refresh, and first-Protect guidance is shown at most once.
+Expected: The finding begins in REVIEW_REQUIRED; its timeline distinguishes user action, Trialvisor action, and provider result. Protection activates only after explicit confirmation. Protection and notice read state persist after refresh, while critical entries remain available.
 
-## Test 3 - Keep decisions and billing gates stay neutral and durable
+## Test 3 - Neutral decisions, Data Controls, and safe feedback
 Viewport: desktop (1280x800)
-Covers: protected-trial decision UX, KEEP path, scheduled cancellation revocation, duplicate-execution guardrail, Stripe configuration gate, webhook-derived billing status
-Description: Verifies the decision surface preserves the selected state and paid access cannot activate before Stripe is fully configured and webhook-verified.
+Covers: KEEP path, durable scheduling revocation, data export, data-retention explanation, contextual feedback, guarded account deletion
+Description: Verifies customer controls are understandable and cannot leak sensitive provider credentials.
 
 Setup:
 1. Add and protect a manual trial through the UI
 
 Steps:
-1. Open Review decision
-2. Select Keep service
-3. Refresh the dashboard and inspect Protection history
-4. Open Plan & billing
+1. Select Keep service and refresh
+2. Open Settings and review Accessed, Processed, Stored, and Retained explanations
+3. Download the account export and submit an incorrect-date report
+4. Open account deletion and cancel before final confirmation
 
-Expected: The service is marked Kept, scheduled cancellation is revoked, the choice remains visible in history, no cancellation is presented as completed, the Free plan remains active, and paid checkout is disabled while Stripe secrets and prices are unconfigured.
+Expected: Keep is durable and revokes scheduled cancellation. Export contains normalized account records but no OAuth tokens, secrets, or full email bodies. Feedback stores safe object context only. Account deletion requires an explicit second confirmation and is not performed when canceled.
 
-## Test 4 - Connected Google account shows bounded discovery validation state
+## Test 4 - Connected Google account uses bounded, review-only discovery
 Viewport: desktop (1280x800)
-Covers: Google OAuth connection state, bounded Gmail sync, incremental checkpoint fallback search, deduplication, real-mailbox validation status
-Description: Verifies Gmail synchronization remains privacy-minimized, avoids unnecessary full rescans after an unchanged history checkpoint, and does not claim real discovery verification without a persisted matched mailbox finding.
+Covers: Google connection state, Gmail sync, provider-side search, incremental checkpoint, confidence, deduplication, persistent sync status
+Description: Verifies privacy-minimized Gmail processing without overstating real-mailbox validation.
 
 Steps:
 1. Connect Google through production OAuth
-2. Select Sync from Connected accounts
-3. Review the discovery validation message and sync again
+2. Select Sync from Connected Accounts
+3. Review the result, Notification Center, and any detected finding, then sync again
 
-Expected: Connection identity and last sync remain visible, an unchanged incremental sync visibly reports that Gmail supplied no new messages without repeating the two-year search, repeated sync does not duplicate findings, and the UI shows the controlled test-message instructions while real mailbox discovery remains pending.
+Expected: Account identity and last sync remain visible. An unchanged history checkpoint avoids repeating a full search, processed messages store normalized signals and source references rather than full bodies, repeated sync does not duplicate findings, all findings remain REVIEW_REQUIRED, and no sync outcome grants cancellation authority. If no real message matches, the UI accurately says validation remains pending.
 
-## Test 5 - Mobile protection flow remains usable during provider failure
+## Test 5 - Mobile failure safety and accessible navigation
 Viewport: mobile (375x667)
-Covers: responsive navigation, mobile discovery review, accessible modal behavior, persistent critical error state, Gmail provider failure safety
-Description: Verifies critical protection controls remain reachable on phone, a failed inbox sync cannot change authorization state, and an unsupported cancellation adapter cannot create a verified result.
+Covers: primary navigation, Notification Center, Connected Accounts, persistent critical failure, keyboard/focus semantics, provider failure safety
+Description: Verifies that core protection and recovery controls remain usable on a phone when Gmail is unavailable.
 
 QA Faults:
 ```json
@@ -69,12 +70,9 @@ QA Faults:
 ]
 ```
 
-Setup:
-1. Add and protect a manual trial through the UI
-
 Steps:
-1. Open mobile navigation and select Connected accounts
-2. Select Sync for Google
-3. Return to Protection center, review the protected trial, and select Cancel as planned
+1. Open mobile navigation, select Connected Accounts, and sync Google
+2. Open Notifications and return to Protection
+3. Traverse controls by keyboard and inspect focus, labels, and touch targets
 
-Expected: A persistent Gmail error is shown, navigation and modal controls remain usable at 375px width, the failed sync grants no authorization, and cancellation moves to Action Required without verified evidence or confirmed savings because no production provider adapter is enabled.
+Expected: The sync failure is persistently available with a contextual recovery action, failed discovery grants no authorization, navigation and dialogs fit at 375px, controls have visible focus and accessible names, status is not conveyed by color alone, and no cancellation is shown as verified without provider evidence.
