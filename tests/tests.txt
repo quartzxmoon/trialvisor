@@ -44,7 +44,7 @@ Expected: Keep is durable and revokes scheduled cancellation. The billing screen
 
 ## Test 4 - Connected Google account uses bounded, review-only discovery
 Viewport: desktop (1280x800)
-Covers: authenticated session restoration, Google connection state, Gmail sync, focused provider-side searches, HTML/plain-text parsing, versioned reprocessing, incremental history pagination and checkpoint fallback, confidence, deduplication, persistent sync status
+Covers: authenticated session restoration, Google connection state, Gmail sync, bounded focused-search pagination, HTML/plain-text parsing, versioned reprocessing, incremental history pagination and checkpoint fallback, confidence, deduplication, persistent sync status
 Description: Verifies the dashboard and privacy-minimized Gmail processing recover a refreshable authenticated session without overstating real-mailbox validation.
 
 Steps:
@@ -52,7 +52,7 @@ Steps:
 2. Confirm the dashboard returns, then select Sync from Connected Accounts
 3. Review the result, Notification Center, and any detected finding, then sync again after another session refresh
 
-Expected: The refreshable AppDeploy session is restored before the dashboard or Sync request and a failed restoration shows explicit sign-in recovery instead of an endless loader. Account identity and last sync remain visible. Until the first real match, the bounded validation search can reprocess candidates handled by an older parser version; after validation, incremental history avoids unnecessary full searches and paginates within the cap. HTML-only and plain-text candidates can produce HIGH, MEDIUM, or LOW results. Processed messages store normalized signals and source references rather than full bodies, repeated sync does not duplicate findings, all findings remain REVIEW_REQUIRED, and no sync outcome grants cancellation authority. The result states its search mode, counts, confidence mix, and whether deduplication prevented a new item.
+Expected: The refreshable AppDeploy session is restored before the dashboard or Sync request and a failed restoration shows explicit sign-in recovery instead of an endless loader. Account identity and last sync remain visible. Until the first real match, the bounded validation search can reprocess candidates handled by an older parser version and paginates within the cap; after validation, incremental history avoids unnecessary full searches and also paginates within the cap. HTML-only and plain-text candidates can produce HIGH, MEDIUM, or LOW results. Processed messages store normalized signals and source references rather than full bodies, repeated sync does not duplicate findings, different plans are not collapsed solely because they share a provider, and every discovered finding remains REVIEW_REQUIRED until an audited explicit Protect action. No sync outcome grants cancellation authority. The result states its search mode, counts, confidence mix, and whether deduplication prevented a new item.
 
 ## Test 5 - Mobile failure safety and accessible navigation
 Viewport: mobile (375x667)

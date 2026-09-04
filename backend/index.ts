@@ -21,7 +21,7 @@ const decodeB64Url=(s:string)=>{try{return new TextDecoder().decode(Uint8Array.f
 const googleFetch=async(url:string,accessToken:string)=>fetch(url,{headers:{Authorization:'Bearer '+accessToken}});
 const destroyGoogleToken=async(u:string,x:GoogleTokenRecord,reason:string)=>{const now=new Date().toISOString();await db.update(table(u,'google-tokens'),[{id:x.id,record:{...x,ciphertext:'',iv:'',revokedAt:now,updatedAt:now}}]);await audit(u,'connection','GOOGLE_REAUTH_REQUIRED',reason)};
 const googleAccessToken=async(u:string,x:GoogleTokenRecord)=>{const plain=await decryptTokens(x.ciphertext,x.iv) as {access_token?:string;refresh_token?:string;expires_in?:number};if(new Date(x.tokenExpiration).getTime()>Date.now()+60000&&plain.access_token)return plain.access_token;if(!plain.refresh_token){await destroyGoogleToken(u,x,'Google access expired without a refresh token.');throw new Error('reconnect_required')}const clientId=await secrets.readSecret('GOOGLE_CLIENT_ID'),clientSecret=await secrets.readSecret('GOOGLE_CLIENT_SECRET');const r=await fetch('https://oauth2.googleapis.com/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({client_id:clientId,client_secret:clientSecret,refresh_token:plain.refresh_token,grant_type:'refresh_token'})});if(!r.ok){await destroyGoogleToken(u,x,'Google refresh was rejected; local token material destroyed.');throw new Error('reconnect_required')}const fresh=await r.json() as {access_token:string;expires_in:number;refresh_token?:string};const merged={...plain,...fresh,refresh_token:fresh.refresh_token||plain.refresh_token},encrypted=await encryptTokens(merged),now=new Date().toISOString();await db.update(table(u,'google-tokens'),[{id:x.id,record:{...x,...encrypted,tokenExpiration:new Date(Date.now()+fresh.expires_in*1000).toISOString(),updatedAt:now}}]);await audit(u,'connection','GOOGLE_TOKEN_REFRESHED','Google access refreshed server-side.');return fresh.access_token};
-const GMAIL_PROCESSOR_VERSION=3;
+const GMAIL_PROCESSOR_VERSION=4;
 const GMAIL_CANDIDATE_CAP=180;
 const CANVA_CANCEL_URL='https://www.canva.com/help/cancel-canva-plan/';
 const providerSupport=(provider:string):{support:ProviderSupport;tier:'3';cancellationUrl?:string}=>/\bcanva\b/i.test(provider)?{support:'GUIDED',tier:'3',cancellationUrl:CANVA_CANCEL_URL}:{support:'NOT_SUPPORTED',tier:'3'};
@@ -51,6 +51,7 @@ const classifySignal=(m:GmailMessage)=>{
  const provider=rawProvider.replace(/\b(?:no[\s-]?reply|billing|support|team)\b/gi,'').replace(/\s+/g,' ').trim().slice(0,80)||'Subscription';
  return{provider,plan:value.subject.slice(0,120)||'Detected subscription',price:price?Number(price[1].replace(',','.')):0,currency:'USD',trialEnd:end.toISOString(),safeDeadline:deadline.toISOString(),plannedExecution:new Date(deadline.getTime()-3600000).toISOString(),state:'REVIEW_REQUIRED' as State,...providerSupport(provider),confidence,confidenceBand:band,sourceRef:{provider:'google' as const,messageId:m.id,threadId:m.threadId,receivedAt:m.internalDate?new Date(Number(m.internalDate)).toISOString():undefined}};
 };
+const normalizedPlan=(value:string)=>value.toLowerCase().replace(/\b(?:your|free|trial|has|started|ends?|ending|expires?|renewal|subscription|membership|confirmation|reminder|will|be|charged|after|on)\b/g,' ').replace(/[^a-z0-9]+/g,' ').trim();
 const syncGoogle=async(u:string)=>{
  const records=(await db.list<GoogleTokenRecord>(table(u,'google-tokens'),{limit:10})).items.filter(x=>!x.revokedAt&&x.ciphertext);
  if(!records.length)throw new Error('google_not_connected');
@@ -72,8 +73,8 @@ const syncGoogle=async(u:string)=>{
     if(historyResponse.status===401){await destroyGoogleToken(u,rec,'Google rejected the access token.');throw new Error('reconnect_required')}
     if(!historyResponse.ok)throw new Error('gmail_history_failed_'+historyResponse.status);
     const data=await historyResponse.json() as {history?:Array<{messagesAdded?:Array<{message:{id:string}}>}>;nextPageToken?:string};
-    for(const event of data.history||[])for(const added of event.messagesAdded||[])ids.add(added.message.id);
-    pageToken=data.nextPageToken||'';if(!pageToken)break;
+     for(const event of data.history||[])for(const added of event.messagesAdded||[]){if(ids.size<GMAIL_CANDIDATE_CAP)ids.add(added.message.id);else capped=true}
+     pageToken=data.nextPageToken||'';if(!pageToken)break;if(page===2)capped=true;
    }
    if(ids.size){incrementalCandidates+=ids.size;modes.add('incremental')}
   }
@@ -84,14 +85,18 @@ const syncGoogle=async(u:string)=>{
     'newer_than:1y {"subscription renewal" "membership renews" "renews on" "next billing date" "upcoming payment"}',
     'newer_than:1y from:(canva.com) {"cancellation confirmed" "subscription has been cancelled" "subscription has been canceled" "plan was cancelled" "plan was canceled"}'
    ];
-   for(const query of queries){
-    if(ids.size>=GMAIL_CANDIDATE_CAP){capped=true;break}
-    const url='https://gmail.googleapis.com/gmail/v1/users/me/messages?q='+encodeURIComponent(query)+'&maxResults=100';
-    const response=await googleFetch(url,access);
-    if(response.status===401){await destroyGoogleToken(u,rec,'Google rejected the access token.');throw new Error('reconnect_required')}
-    if(!response.ok)throw new Error('gmail_search_failed_'+response.status);
-    const data=await response.json() as {messages?:Array<{id:string}>};
-    const before=ids.size;for(const item of data.messages||[])ids.add(item.id);searchCandidates+=ids.size-before;
+    for(const query of queries){
+     if(ids.size>=GMAIL_CANDIDATE_CAP){capped=true;break}
+     let pageToken='';
+     for(let page=0;page<2&&ids.size<GMAIL_CANDIDATE_CAP;page++){
+      const url='https://gmail.googleapis.com/gmail/v1/users/me/messages?q='+encodeURIComponent(query)+'&maxResults=100'+(pageToken?'&pageToken='+encodeURIComponent(pageToken):'');
+      const response=await googleFetch(url,access);
+      if(response.status===401){await destroyGoogleToken(u,rec,'Google rejected the access token.');throw new Error('reconnect_required')}
+      if(!response.ok)throw new Error('gmail_search_failed_'+response.status);
+      const data=await response.json() as {messages?:Array<{id:string}>;nextPageToken?:string};
+      const before=ids.size;for(const item of data.messages||[]){if(ids.size<GMAIL_CANDIDATE_CAP)ids.add(item.id);else capped=true}searchCandidates+=ids.size-before;
+      pageToken=data.nextPageToken||'';if(!pageToken)break;if(page===1)capped=true;
+     }
    }
   }
   const existingTrials=await listTrials(u);
@@ -107,7 +112,7 @@ const syncGoogle=async(u:string)=>{
    if(prior)await db.update(table(u,'gmail-sources'),[{id:prior.id,record:{...prior,...sourceRecord}}]);else await db.add(table(u,'gmail-sources'),[sourceRecord]);
    if(!signal)continue;
    matched++;if(signal.confidenceBand==='HIGH')high++;else if(signal.confidenceBand==='MEDIUM')medium++;else low++;
-   const related=existingTrials.some(t=>t.sourceRef?.messageId===id||t.sourceRef?.threadId===message.threadId||(t.provider.toLowerCase()===signal.provider.toLowerCase()&&Math.abs(new Date(t.trialEnd).getTime()-new Date(signal.trialEnd).getTime())<7*86400000));
+    const related=existingTrials.some(t=>t.sourceRef?.messageId===id||t.sourceRef?.threadId===message.threadId||(t.provider.toLowerCase()===signal.provider.toLowerCase()&&(normalizedPlan(t.plan)===normalizedPlan(signal.plan)||(t.price>0&&signal.price>0&&Math.abs(t.price-signal.price)<.01))&&Math.abs(new Date(t.trialEnd).getTime()-new Date(signal.trialEnd).getTime())<7*86400000));
    if(related){duplicates++;continue}
    const [trialId]=await db.add(table(u,'trials'),[{userId:u,...signal}]);
    if(trialId){existingTrials.push({id:trialId,userId:u,...signal});created++}
@@ -131,7 +136,7 @@ const activityTitle:Record<string,string>={TRIAL_DETECTED:'Trial detected',TRIAL
 const activityActor=(type:string):'USER ACTION'|'TRIALVISOR ACTION'|'PROVIDER RESULT'=>['TRIAL_CREATED','AUTHORIZATION_GRANTED','KEEP_SELECTED','CANCEL_SELECTED','PROVIDER_STEP_REPORTED'].includes(type)?'USER ACTION':['CANCELED_CONFIRMED','CANCELLATION_FAILED','GOOGLE_REAUTH_REQUIRED'].includes(type)?'PROVIDER RESULT':'TRIALVISOR ACTION';
 const customerActivity=(a:any)=>({id:a.id,type:a.type,trialId:a.trialId,title:activityTitle[a.type]||'Protection activity',detail:String(a.detail||'Activity recorded.').slice(0,500),at:a.at,actor:activityActor(a.type)});
 const ensureAccount=async(u:string)=>{const records=(await db.list<any>(table(u,'account'),{limit:20})).items,now=new Date().toISOString();if(records.length){if(records.every(x=>x.lifecycleVersion===3))return records[0];const corrected=records.map(x=>({...x,lifecycleVersion:3,onboardingComplete:false,onboardingCompletedAt:undefined,guidanceShown:Array.isArray(x.guidanceShown)?x.guidanceShown:[]}));await db.update(table(u,'account'),corrected.map(x=>({id:x.id,record:x})));return corrected[0]}const record={userId:u,lifecycleVersion:3,initializedAt:now,onboardingComplete:false,guidanceShown:[] as string[]};const [id]=await db.add(table(u,'account'),[record]);return{...record,id}};
-const integrationDiagnostics=async(u:string)=>{const tokens=(await db.list<GoogleTokenRecord>(table(u,'google-tokens'),{limit:10})).items,active=tokens.filter(x=>!x.revokedAt&&!!x.ciphertext),sync=(await db.list<any>(table(u,'google-sync'),{limit:10})).items,sources=(await db.list<any>(table(u,'gmail-sources'),{limit:500})).items,trials=await listTrials(u),audits=(await db.list<any>(table(u,'audit'),{limit:100})).items;return{tenantUserId:u,google:{connected:active.length>0,accountCount:active.length,encryptedRecords:active.map(x=>({providerAccountIdentifier:x.providerAccountIdentifier,ciphertextPresent:!!x.ciphertext,ivPresent:!!x.iv,tokenExpiration:x.tokenExpiration,authorizedScopes:x.authorizedScopes,updatedAt:x.updatedAt})),callbackValidated:audits.some(x=>x.type==='ACCOUNT_CONNECTED'&&String(x.detail).includes('production OAuth')),refreshObserved:audits.some(x=>x.type==='GOOGLE_TOKEN_REFRESHED'),localDestructionObserved:tokens.some(x=>!!x.revokedAt&&!x.ciphertext&&!x.iv),remoteRevocationAttempted:audits.some(x=>x.type==='GOOGLE_REMOTE_REVOCATION_ATTEMPTED')},gmail:{checkpointCount:sync.length,historyCheckpointPresent:sync.some(x=>!!x.historyId),lastSync:sync.map(x=>x.lastSync).sort().at(-1)||null,processedReferences:sources.length,matchedReferences:sources.filter(x=>x.matched).length,retainedFullBodies:false,confidence:{HIGH:trials.filter(x=>x.confidenceBand==='HIGH').length,MEDIUM:trials.filter(x=>x.confidenceBand==='MEDIUM').length,LOW:trials.filter(x=>x.confidenceBand==='LOW').length},reviewOnly:trials.filter(x=>!!x.sourceRef).every(x=>x.state==='REVIEW_REQUIRED')}}};
+const integrationDiagnostics=async(u:string)=>{const tokens=(await db.list<GoogleTokenRecord>(table(u,'google-tokens'),{limit:10})).items,active=tokens.filter(x=>!x.revokedAt&&!!x.ciphertext),sync=(await db.list<any>(table(u,'google-sync'),{limit:10})).items,sources=(await db.list<any>(table(u,'gmail-sources'),{limit:500})).items,trials=await listTrials(u),audits=(await db.list<any>(table(u,'audit'),{limit:100})).items;return{tenantUserId:u,google:{connected:active.length>0,accountCount:active.length,encryptedRecords:active.map(x=>({providerAccountIdentifier:x.providerAccountIdentifier,ciphertextPresent:!!x.ciphertext,ivPresent:!!x.iv,tokenExpiration:x.tokenExpiration,authorizedScopes:x.authorizedScopes,updatedAt:x.updatedAt})),callbackValidated:audits.some(x=>x.type==='ACCOUNT_CONNECTED'&&String(x.detail).includes('production OAuth')),refreshObserved:audits.some(x=>x.type==='GOOGLE_TOKEN_REFRESHED'),localDestructionObserved:tokens.some(x=>!!x.revokedAt&&!x.ciphertext&&!x.iv),remoteRevocationAttempted:audits.some(x=>x.type==='GOOGLE_REMOTE_REVOCATION_ATTEMPTED')},gmail:{checkpointCount:sync.length,historyCheckpointPresent:sync.some(x=>!!x.historyId),lastSync:sync.map(x=>x.lastSync).sort().at(-1)||null,processedReferences:sources.length,matchedReferences:sources.filter(x=>x.matched).length,retainedFullBodies:false,confidence:{HIGH:trials.filter(x=>x.confidenceBand==='HIGH').length,MEDIUM:trials.filter(x=>x.confidenceBand==='MEDIUM').length,LOW:trials.filter(x=>x.confidenceBand==='LOW').length},reviewOnly:trials.filter(x=>!!x.sourceRef).every(x=>x.state==='REVIEW_REQUIRED'||(!!x.authorizationAt&&audits.some(a=>a.trialId===x.id&&a.type==='AUTHORIZATION_GRANTED')))}}};
 const config=async()=>{const n=await secrets.listSecretNames();return{google:n.includes('GOOGLE_CLIENT_ID')&&n.includes('GOOGLE_CLIENT_SECRET')&&n.includes('GOOGLE_TOKEN_ENCRYPTION_KEY'),microsoft:n.includes('MICROSOFT_CLIENT_ID')&&n.includes('MICROSOFT_CLIENT_SECRET'),stripe:await billingConfigured(),email:n.includes('RESEND_API_KEY')}};
 const listTrials=async(u:string)=>(await db.list<Trial>(table(u,'trials'),{limit:50})).items.map(t=>({...t,...providerSupport(t.provider)}));
 const findTrial=async(u:string,id:string)=>{const [t]=await db.get<Trial>(table(u,'trials'),[id]);return t?{...t,id}:null};
