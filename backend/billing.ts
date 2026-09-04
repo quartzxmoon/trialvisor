@@ -138,7 +138,7 @@ export const createCheckout=async(userId:string,email:string|undefined,cadence:u
   else if(email)params.customer_email=email;
   const session=await stripe.checkout.sessions.create(params);
   if(!session.url)return error('Stripe did not return a checkout URL',502);
-  await saveBilling(userId,{status:'checkout_pending',plan:'FREE',cadence,lastCheckoutAt:new Date().toISOString(),lastCheckoutSessionId:session.id});
+  await saveBilling(userId,{status:'checkout_pending',plan:'FREE',cadence,subscriptionId:'',priceId:'',currentPeriodEnd:'',cancelAtPeriodEnd:false,lastCheckoutAt:new Date().toISOString(),lastCheckoutSessionId:session.id});
   return json({url:session.url});
 };
 

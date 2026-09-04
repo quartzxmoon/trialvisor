@@ -78,6 +78,7 @@ The approved sandbox Price IDs are server-side configuration identifiers in the 
 - Duplicate events are recorded and ignored. Checkout, subscription, and invoice ordering are tracked independently so an out-of-order event from one object family cannot suppress a legitimate event from another; older subscription updates cannot overwrite newer subscription state.
 - Renewal dates come from the subscription item's current period end, matching the deployed Stripe API version.
 - Checkout creation is limited to one unresolved session per tenant. A completed session blocks another subscription while its signed entitlement event is pending; an older still-open session is expired before replacement. A one-minute request throttle remains as an additional abuse guard.
+- A replacement Checkout after cancellation retains the tenant-safe Stripe Customer binding but clears the obsolete subscription, Price, renewal, and cancellation-period fields so the new signed subscription event cannot be mistaken for a cross-subscription takeover.
 - Existing authorized cancellation jobs are not deleted or silently abandoned when billing changes. A future feature gate must distinguish blocking new paid actions from honoring already-authorized protection obligations.
 
 ## Tax safety
