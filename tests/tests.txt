@@ -94,3 +94,22 @@ Steps:
 8. With one eligible protected Canva item and a later real Canva confirmation whose Gmail Authentication-Results show passing Canva DKIM, sync again.
 
 Expected: Exactly one item becomes CANCELED_CONFIRMED; remaining scheduled jobs are revoked; the timeline labels the evidence PROVIDER RESULT; a persistent success notification appears; only the message/thread reference, normalized evidence timestamp, and verification status are retained; no complete email body is stored or returned.
+
+## Test 7 - Stripe sandbox subscription lifecycle and tenant isolation
+Viewport: desktop (1280x800) and mobile (375x667)
+Covers: monthly/annual Checkout, signed webhooks, server-owned entitlement, Customer Portal, renewal, payment failure, cancellation, expiration, replay safety, customer binding
+Description: Verifies Trialvisor Pro is granted only from verified Stripe test-mode subscription state and a Stripe Customer can never cross Trialvisor tenant boundaries.
+
+Setup:
+1. Use only the dedicated Trialvisor Stripe sandbox and the existing Trialvisor Pro monthly and annual Prices.
+2. Attach Stripe credentials and Price IDs through AppDeploy private secrets.
+
+Steps:
+1. From a Free tenant, choose monthly, complete prebuilt Checkout with a Stripe test payment method, and return to Trialvisor.
+2. Confirm the browser return alone does not grant Pro; deliver the signed subscription event and confirm durable Pro access.
+3. Open Customer Portal, cancel at period end, confirm Pro remains through the paid period, then advance the sandbox clock through expiration and confirm a safe return to Free.
+4. Repeat with the annual Price, then test renewal, payment failure, past_due/unpaid state, supported reactivation, Checkout abandonment, and an invalid Price ID.
+5. Replay an already processed webhook and send a webhook with an invalid signature.
+6. Attempt Checkout and Portal access while tenant A's billing record contains tenant B's Stripe Customer ID, and call both billing endpoints without authentication.
+
+Expected: Checkout creates or reuses only the authenticated tenant's Stripe Customer. Both Checkout reuse and Portal creation revalidate the global customer-to-tenant binding before contacting Stripe. Signed, allowlisted active/trialing subscription events alone grant Pro. Replayed events are harmless, invalid signatures and unauthorized endpoints are rejected, past_due/unpaid/expired subscriptions do not retain Pro, cancellation at period end preserves entitlement only through the paid period, and no live-mode Stripe object is created or modified.
