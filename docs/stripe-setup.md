@@ -73,6 +73,7 @@ The approved sandbox Price IDs are server-side configuration identifiers in the 
 
 - The browser redirect never grants Pro. Only a signature-verified subscription event can change the server-side entitlement.
 - An active subscription grants Pro only when its Price ID matches one of the two configured Trialvisor Pro Prices.
+- Creating a new Protect authorization is enforced as a Pro capability on the backend. A client-side plan label is never accepted as authorization. Existing protected trials, revocation/Keep decisions, cancellation execution, and verification continue safely if billing later changes so Trialvisor never abandons an already-authorized obligation.
 - A Stripe customer is globally bound to one Trialvisor tenant only after a server-created Checkout record exists. A signed subscription event may establish that binding before Checkout completion arrives, but only when its Trialvisor metadata, approved Price, customer, subscription, and tenant ownership checks all pass.
 - Duplicate events are recorded and ignored. Checkout, subscription, and invoice ordering are tracked independently so an out-of-order event from one object family cannot suppress a legitimate event from another; older subscription updates cannot overwrite newer subscription state.
 - Renewal dates come from the subscription item's current period end, matching the deployed Stripe API version.

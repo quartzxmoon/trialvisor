@@ -6,6 +6,7 @@ const STRIPE_PRICE_PRO_MONTHLY='price_1UBuOfGTXvZ0TX3Afx0TbBsm';
 const STRIPE_PRICE_PRO_ANNUAL='price_1UBuSLGTXvZ0TX3AtAl720ek';
 const REQUIRED_SECRETS=['STRIPE_RESTRICTED_KEY','STRIPE_WEBHOOK_SECRET'];
 const ACTIVE_STATUSES=new Set(['active','trialing']);
+const APPROVED_PRICE_IDS=new Set([STRIPE_PRICE_PRO_MONTHLY,STRIPE_PRICE_PRO_ANNUAL]);
 const CHECKOUT_BLOCKED_STATUSES=new Set(['active','trialing','pending','past_due','unpaid','paused','incomplete','unrecognized_price']);
 
 type BillingRecord={
@@ -92,13 +93,18 @@ export const billingSnapshot=async(userId:string)=>{
   const configured=await billingConfigured(),record=await currentBilling(userId);
   return{
     configured,
-    plan:record&&ACTIVE_STATUSES.has(record.status)?'PRO':'FREE',
+    plan:record&&ACTIVE_STATUSES.has(record.status)&&!!record.priceId&&APPROVED_PRICE_IDS.has(record.priceId)?'PRO':'FREE',
     status:record?.status||'inactive',
     cadence:record?.cadence||null,
     currentPeriodEnd:record?.currentPeriodEnd||null,
     cancelAtPeriodEnd:!!record?.cancelAtPeriodEnd,
     hasCustomer:!!record?.customerId
   };
+};
+
+export const hasProEntitlement=async(userId:string)=>{
+  const record=await currentBilling(userId);
+  return !!record&&ACTIVE_STATUSES.has(record.status)&&!!record.priceId&&APPROVED_PRICE_IDS.has(record.priceId);
 };
 
 export const createCheckout=async(userId:string,email:string|undefined,cadence:unknown)=>{

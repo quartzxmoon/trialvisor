@@ -42,7 +42,7 @@ function App(){
  };
  const openCheckout=async(cadence:'monthly'|'annual')=>{const r=await post('/api/billing/checkout',{cadence});if(r?.url)window.location.assign(r.url)};
  const openPortal=async()=>{const r=await post('/api/billing/portal');if(r?.url)window.location.assign(r.url)};
- const protect=async(t:Trial)=>{const r=await post('/api/trials/'+t.id+'/protect');setModal(null);if(r)showGuidance('FIRST_PROTECT_AUTHORIZATION',guidanceCopy.FIRST_PROTECT_AUTHORIZATION)};
+ const protect=async(t:Trial)=>{if(snap?.billing.plan!=='PRO'){setModal(null);setView('billing');setError('Trialvisor Pro is required to protect a new trial. Choose monthly or annual billing to continue.');return}const r=await post('/api/trials/'+t.id+'/protect');setModal(null);if(r)showGuidance('FIRST_PROTECT_AUTHORIZATION',guidanceCopy.FIRST_PROTECT_AUTHORIZATION)};
  const keep=async(t:Trial)=>{await post('/api/trials/'+t.id+'/keep');setModal(null)};
  const cancel=async(t:Trial)=>{if(t.state==='CANCELLATION_NEEDS_USER'){const r=await post('/api/trials/'+t.id+'/provider-step-complete');if(r){setModal(null);await syncGoogle()}return}await post('/api/trials/'+t.id+'/cancel-selected');setModal(null)};
  const readNotice=async(id:string)=>{await post('/api/notifications/'+id+'/read')};
