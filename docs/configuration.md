@@ -7,6 +7,8 @@ All credentials must be entered through AppDeploy private secret entry. Never co
 - `GOOGLE_CLIENT_ID`
 - `GOOGLE_CLIENT_SECRET`
 - `GOOGLE_TOKEN_ENCRYPTION_KEY`
+- `STRIPE_RESTRICTED_KEY`
+- `STRIPE_WEBHOOK_SECRET`
 
 The encryption key must decode to exactly 32 bytes. Google access and refresh tokens are persisted only as AES-256-GCM ciphertext with a unique IV.
 
@@ -18,14 +20,11 @@ The encryption key must decode to exactly 32 bytes. Google access and refresh to
 
 Microsoft access should request only the minimum read-only mail and offline-access scopes required for discovery. Do not request send, delete, modify, mailbox-settings, contacts, files, or calendar permissions.
 
-## Planned Stripe configuration
+## Current Stripe sandbox configuration
 
-- `STRIPE_RESTRICTED_KEY`
-- `STRIPE_WEBHOOK_SECRET`
-- `STRIPE_PRICE_PRO_MONTHLY`
-- `STRIPE_PRICE_PRO_ANNUAL`
+The deployed test-mode backend reads only `STRIPE_RESTRICTED_KEY` and `STRIPE_WEBHOOK_SECRET`. The two approved Trialvisor Pro sandbox Price IDs are backend allowlist identifiers, not secrets, and are configured in `backend/billing.ts`.
 
-Use separate test and live credentials. Prefer a restricted API key with only the permissions required for Checkout Sessions, Customers, Subscriptions, and Billing Portal sessions. Webhook signatures must be verified before processing events. Stripe entitlement state must be derived server-side and must never trust a browser redirect alone.
+Use separate test and live credentials. The restricted key grants Write only for Checkout Sessions and Customer/Billing Portal Sessions; all other Stripe resources remain None. The backend does not directly call Customers, Subscriptions, Products, Prices, Events, Webhook Endpoints, Connect, payouts, balances, or disputes. Webhook signatures must be verified before processing events. Stripe entitlement state is derived server-side and never trusts a browser redirect alone.
 
 Stripe webhook URL:
 
@@ -34,12 +33,13 @@ Stripe webhook URL:
 Subscribe at minimum to:
 
 - `checkout.session.completed`
+- `checkout.session.expired`
 - `customer.subscription.created`
 - `customer.subscription.updated`
 - `customer.subscription.deleted`
 - `invoice.payment_failed`
 
-The restricted key needs write access to Checkout Sessions and Billing Portal Sessions, and the minimum supporting Customer, Subscription, Product, and Price permissions required by Stripe for those flows. Configure the Customer Portal separately in Stripe test mode before exercising the portal route.
+The Customer Portal is configured separately in the Trialvisor sandbox with payment-method updates, invoice history, end-of-period cancellation, and cancellation reasons enabled. Plan switching remains disabled.
 
 Do not enable Stripe automatic tax until applicable registrations are active and the commercial tax decision has been reviewed.
 

@@ -20,7 +20,7 @@ This repository is a secret-free copy of the AppDeploy production source. AppDep
 - Connected-inbox tokens remain backend-only and encrypted at rest.
 - Retained Gmail data is limited to normalized signals and necessary message/thread references; full message bodies are not stored.
 - Gmail discovery uses bounded focused searches for initial/validation runs, paginated incremental history after checkpoints, versioned candidate reprocessing, and thread/provider/date deduplication. Every match remains `REVIEW_REQUIRED`.
-- Stripe Checkout and Customer Portal remain backend-created; Pro entitlement is webhook-authoritative, globally tenant/customer-bound by Checkout completion, Price-allowlisted, replay-aware, and disabled until all test-mode secrets are attached.
+- Stripe Checkout and Customer Portal remain backend-created; Pro entitlement is webhook-authoritative, requires a server-created Checkout record, is globally tenant/customer-bound, Price-allowlisted, replay-aware, and grants new Protect authorization only while the verified subscription remains active or trialing.
 - Billing changes must never silently cancel or abandon an already-authorized protection obligation.
 
 ## Local validation
@@ -49,7 +49,7 @@ Implementation boundaries and the future status-page gate are documented in `doc
 - Complete one controlled real-mailbox Gmail detection and verify persistence/rendering.
 - Complete the real-world validation gate for the deployed Canva Guided workflow and Gmail-authenticated confirmation evidence; keep Canva out of Autopilot because the customer still performs the provider action.
 - Configure Microsoft OAuth and validate Microsoft Graph discovery.
-- Attach Stripe test credentials and Price IDs, configure the signed webhook endpoint, and complete Checkout/Portal end-to-end validation.
+- Complete authenticated Customer Portal navigation plus Stripe test-clock renewal, failed-payment, replay, and final-expiration validation before any live-mode migration.
 - Publish final privacy policy, terms, data-retention policy, support process, and incident-response runbook.
 
 See `docs/configuration.md`, `docs/deployment.md`, and `docs/stripe-setup.md` before changing production.

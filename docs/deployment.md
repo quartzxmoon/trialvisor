@@ -27,5 +27,5 @@ The `durable-actions` cron runs every five minutes. Jobs must be idempotent, ten
 
 - Google: complete OAuth plus at least one real detected, normalized, persisted, and rendered Gmail signal.
 - Microsoft: complete OAuth plus at least one real Graph-discovered signal.
-- Stripe: attach test credentials and Price IDs through AppDeploy private secret entry, register `/api/billing/webhook`, then complete Checkout, signed webhook processing, entitlement persistence, Customer Portal, cancellation, and failed-payment behavior before live mode.
+- Stripe: sandbox secrets, existing Prices, Checkout, signed webhooks, tenant binding, durable entitlement, Customer Portal configuration, cancellation-at-period-end, reactivation, and negative endpoint checks are complete. Authenticated Portal navigation plus test-clock renewal, failure, replay, and final-expiration checks remain required before live mode.
 - Cancellation providers: verify the remote postcondition independently; a click or HTTP 200 alone is not evidence of cancellation.
