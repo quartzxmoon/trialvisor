@@ -40,6 +40,7 @@ Pricing is a commercial decision. Keep the monthly and annual Prices attached to
 
 4. Subscribe to:
    - `checkout.session.completed`
+   - `checkout.session.expired`
    - `customer.subscription.created`
    - `customer.subscription.updated`
    - `customer.subscription.deleted`
@@ -49,12 +50,17 @@ Pricing is a commercial decision. Keep the monthly and annual Prices attached to
 
 ## 5. Attach AppDeploy secrets
 
-Use four separate AppDeploy private secret-entry links:
+Use two separate AppDeploy private secret-entry links:
 
 - `STRIPE_RESTRICTED_KEY`
 - `STRIPE_WEBHOOK_SECRET`
-- `STRIPE_PRICE_PRO_MONTHLY`
-- `STRIPE_PRICE_PRO_ANNUAL`
+
+The connector-verified test Price IDs are server-side allowlist constants in `backend/billing.ts`:
+
+- Monthly: `price_1UBuOfGTXvZ0TX3Afx0TbBsm`
+- Annual: `price_1UBuSLGTXvZ0TX3AtAl720ek`
+
+Both belong to test-mode product `prod_VCJ0D81ackUsrY`. Price IDs are identifiers rather than credentials, so they do not require secret storage. Re-verify the product, amounts, currency, intervals, active state, and `livemode=false` before any deployment that changes these identifiers.
 
 Never paste any of these values into chat, GitHub, Figma, logs, or frontend configuration.
 

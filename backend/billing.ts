@@ -2,7 +2,9 @@ import Stripe from 'stripe';
 import { db, error, json, notifications, secrets } from '@appdeploy/sdk';
 
 const APP_URL='https://trialvisor-m8vrsu.v2.appdeploy.ai/';
-const REQUIRED_SECRETS=['STRIPE_RESTRICTED_KEY','STRIPE_WEBHOOK_SECRET','STRIPE_PRICE_PRO_MONTHLY','STRIPE_PRICE_PRO_ANNUAL'];
+const STRIPE_PRICE_PRO_MONTHLY='price_1UBuOfGTXvZ0TX3Afx0TbBsm';
+const STRIPE_PRICE_PRO_ANNUAL='price_1UBuSLGTXvZ0TX3AtAl720ek';
+const REQUIRED_SECRETS=['STRIPE_RESTRICTED_KEY','STRIPE_WEBHOOK_SECRET'];
 const ACTIVE_STATUSES=new Set(['active','trialing']);
 
 type BillingRecord={
@@ -98,8 +100,8 @@ export const createCheckout=async(userId:string,email:string|undefined,cadence:u
   const current=await currentBilling(userId);
   if(current&&ACTIVE_STATUSES.has(current.status))return error('An active subscription already exists',409);
   if(current?.lastCheckoutAt&&Date.now()-new Date(current.lastCheckoutAt).getTime()<60000)return error('A checkout session was just created. Please wait before trying again.',429);
-  const priceSecret=cadence==='monthly'?'STRIPE_PRICE_PRO_MONTHLY':'STRIPE_PRICE_PRO_ANNUAL';
-  const priceId=await secrets.readSecret(priceSecret),stripe=await stripeClient();
+  const priceId=cadence==='monthly'?STRIPE_PRICE_PRO_MONTHLY:STRIPE_PRICE_PRO_ANNUAL,stripe=await stripeClient();
+  if(current?.customerId)await ensureCustomerBinding(current.customerId,userId,false);
   const params:Stripe.Checkout.SessionCreateParams={
     mode:'subscription',
     line_items:[{price:priceId,quantity:1}],
@@ -123,11 +125,21 @@ export const createPortal=async(userId:string)=>{
   if(!await billingConfigured())return error('Stripe billing is not configured',503);
   const current=await currentBilling(userId);
   if(!current?.customerId)return error('No Stripe customer exists for this account',409);
+  await ensureCustomerBinding(current.customerId,userId,false);
   const stripe=await stripeClient(),session=await stripe.billingPortal.sessions.create({customer:current.customerId,return_url:APP_URL+'?billing=portal'});
   return json({url:session.url});
 };
 
 const applyStripeEvent=async(event:Stripe.Event)=>{
+  if(event.type==='checkout.session.expired'){
+    const session=event.data.object as Stripe.Checkout.Session,userId=session.client_reference_id||session.metadata?.trialvisor_user_id;
+    if(!userId)return;
+    const prior=await currentBilling(userId);
+    if(prior?.lastStripeEventId===event.id||(prior?.lastStripeEventCreated||0)>event.created)return;
+    if(prior?.lastCheckoutSessionId!==session.id)return;
+    await saveBilling(userId,{status:'checkout_abandoned',plan:'FREE',lastStripeEventId:event.id,lastStripeEventCreated:event.created});
+    return;
+  }
   if(event.type==='checkout.session.completed'){
     const session=event.data.object as Stripe.Checkout.Session,userId=session.client_reference_id||session.metadata?.trialvisor_user_id;
     if(!userId)return;
@@ -148,30 +160,7 @@ const applyStripeEvent=async(event:Stripe.Event)=>{
     if(prior?.lastStripeEventId===event.id||(prior?.lastStripeEventCreated||0)>event.created)return;
     if(prior?.customerId&&customerId&&prior.customerId!==customerId)throw new Error('stripe_customer_ownership_mismatch');
     await ensureCustomerBinding(customerId,userId,false);
-    const price=subscription.items.data[0]?.price,monthlyPriceId=await secrets.readSecret('STRIPE_PRICE_PRO_MONTHLY'),annualPriceId=await secrets.readSecret('STRIPE_PRICE_PRO_ANNUAL'),recognized=price?.id===monthlyPriceId||price?.id===annualPriceId,cadence=price?.id===annualPriceId?'annual':'monthly',active=recognized&&ACTIVE_STATUSES.has(subscription.status);
+    const price=subscription.items.data[0]?.price,recognized=price?.id===STRIPE_PRICE_PRO_MONTHLY||price?.id===STRIPE_PRICE_PRO_ANNUAL,cadence=price?.id===STRIPE_PRICE_PRO_ANNUAL?'annual':'monthly',active=recognized&&ACTIVE_STATUSES.has(subscription.status);
     if(!recognized){await saveBilling(userId,{customerId,subscriptionId:subscription.id,status:'unrecognized_price',plan:'FREE',priceId:price?.id,lastStripeEventId:event.id,lastStripeEventCreated:event.created});await billingNotice(userId,'Billing configuration review required','Stripe reported a subscription Price that is not approved for Trialvisor Pro. Paid access was not granted.','critical');return}
     await saveBilling(userId,{customerId,subscriptionId:subscription.id,status:subscription.status,plan:active?'PRO':'FREE',cadence,priceId:price.id,currentPeriodEnd:periodEnd((subscription as unknown as {current_period_end?:number}).current_period_end),cancelAtPeriodEnd:subscription.cancel_at_period_end,lastStripeEventId:event.id,lastStripeEventCreated:event.created});
-    if(prior?.status!==subscription.status){if(subscription.status==='past_due'||subscription.status==='unpaid'){await billingNotice(userId,'Billing action required','Update your payment method to keep Trialvisor protection features active.','critical');await notifications.send({userIds:[userId],notification:{title:'Billing action required',body:'Update your payment method to keep Trialvisor protection features active.'},data:{kind:'billing',status:subscription.status}})}else if(active)await billingNotice(userId,'Trialvisor Pro active','Paid access was activated only after Stripeâ€™s signed subscription event was verified.','success');else if(event.type==='customer.subscription.deleted')await billingNotice(userId,'Paid plan ended','Trialvisor Pro is no longer active. Your retained account data remains available under the current free-plan rules.','warning')}
-    return;
-  }
-  if(event.type==='invoice.payment_failed'){
-    const invoice=event.data.object as unknown as {parent?:{subscription_details?:{metadata?:Record<string,string>}}},userId=invoice.parent?.subscription_details?.metadata?.trialvisor_user_id;
-    if(userId){await billingNotice(userId,'Payment failed','Trialvisor could not renew your paid plan. Open Plan & billing to update payment details.','critical');await notifications.send({userIds:[userId],notification:{title:'Payment failed',body:'Trialvisor could not renew your paid plan. Open Plan & billing to update payment details.'},data:{kind:'billing',status:'past_due'}})};
-  }
-};
-
-export const handleStripeWebhook=async(event:any)=>{
-  const signature=header(event,'stripe-signature'),body=rawBody(event);
-  if(!signature||!body)return error('Missing Stripe webhook signature',400);
-  if(body.length>512000)return error('Stripe webhook payload is too large',413);
-  if(!await billingConfigured())return error('Stripe billing is not configured',503);
-  const stripe=await stripeClient(),endpointSecret=await secrets.readSecret('STRIPE_WEBHOOK_SECRET');
-  let stripeEvent:Stripe.Event;
-  try{stripeEvent=stripe.webhooks.constructEvent(body,signature,endpointSecret)}catch{return error('Invalid Stripe webhook signature',400)}
-  const marker=eventMarker(stripeEvent.id),seen=(await db.list(marker,{limit:1})).items;
-  if(seen.length)return json({received:true,duplicate:true});
-  await applyStripeEvent(stripeEvent);
-  const [saved]=await db.add(marker,[{eventId:stripeEvent.id,type:stripeEvent.type,processedAt:new Date().toISOString()}]);
-  if(!saved)throw new Error('stripe_event_marker_failed');
-  return json({received:true});
-};
+    if(prior?.status!==subscription.status){if(subscription.status==='past_due'||subscription.status==='unpaid'){await billingNotice(userId,'Billing action required','Update your payment method to keep Trialvisor protection features active.','critical');await notifications.send({userIds:[userId],notificawz÷»h‘éì¶»§q«^u½Ñ¥”¹Í•Ù•É¥Ñäµ¥¹™½í‰½É‘•Èµ±•™Ğµ½±½ÈèŒÌäÜÕˆåô¹¹½Ñ¥”¹¥ÌµÉ•…‘í½Á…¥Ñäè¸ÜÙô¹¹½Ñ¥”µ¥½¹íİ¥‘Ñ èÌáÁàí¡•¥¡ĞèÌáÁàí‘¥ÍÁ±…äéÉ¥íÁ±…”µ¥Ñ•µÌé•¹Ñ•Èí‰½É‘•ÈµÉ…‘¥ÕÌèÄÁÁàí‰…­É½Õ¹è•™˜Õ™„í½±½ÈèŒÌÄÕˆİ‘ô¹¹½Ñ¥”µ¥½¸ÍÙíİ¥‘Ñ èÄåÁáô¹¹½Ñ¥”µµ•Ñ…í‘¥ÍÁ±…äé™±•àí…ÀèåÁàí…±¥¸µ¥Ñ•µÌé•¹Ñ•Èí™±•àµİÉ…ÀéİÉ…Àí™½¹ĞµÍ¥é”èåÁàíÑ•áĞµÑÉ…¹Í™½É´éÕÁÁ•É…Í”í±•ÑÑ•ÈµÍÁ…¥¹œè¸Àá•´í½±½ÈèŒÜÄàÈäÙô¹¹½Ñ¥”µµ•Ñ„¥í™½¹ĞµÍÑå±”é¹½Éµ…°í½±½ÈèŒÄÜØå”Àí™½¹Ğµİ•¥¡ĞèàÀÁô¹¹½Ñ¥” Íí™½¹ĞèÜÀÀ€ÄÙÁà5…¹É½Á”íµ…É¥¸èİÁà€À€ÑÁáô¹¹½Ñ¥”Áí™½¹ĞµÍ¥é”èÄÍÁàí½±½ÈèŒØÄÜÔàäí±¥¹”µ¡•¥¡ĞèÄ¸ÔÔíµ…É¥¸èÁô¹¹½Ñ¥”Íµ…±±í‘¥ÍÁ±…äé‰±½¬íµ…É¥¸µÑ½ÀèİÁàí½±½ÈèŒĞĞÕ˜Üåô¹¹½Ñ¥”µ…Ñ¥½¹Íí‘¥ÍÁ±…äé™±•àí…ÀèİÁàí™±•àµİÉ…ÀéİÉ…Áô¹¹½Ñ¥”µ…Ñ¥½¹Ìù‰ÕÑÑ½¹í™½¹ĞµÍ¥é”èÄÅÁàíµ…É¥¸èÀíÁ…‘‘¥¹œèáÁà€ÄÁÁáô¹Ñ¥µ•±¥¹•í‘¥ÍÁ±…äéÉ¥í…ÀèÀí‰…­É½Õ¹è™™˜í‰½É‘•ÈèÅÁàÍ½±¥€‘”Õ•˜í‰½É‘•ÈµÉ…‘¥ÕÌèÄÙÁàíÁ…‘‘¥¹œèÄÁÁà€ÈÑÁáô¹Ñ¥µ•±¥¹”…ÉÑ¥±•í‘¥ÍÁ±…äéÉ¥íÉ¥µÑ•µÁ±…Ñ”µ½±Õµ¹ÌèÄáÁà€Å™Èí…ÀèÄÑÁàíÁ…‘‘¥¹œèÄáÁà€Àí‰½É‘•Èµ‰½ÑÑ½´èÅÁàÍ½±¥€”Ù•‰˜Åô¹Ñ¥µ•±¥¹”…ÉÑ¥±”é±…ÍĞµ¡¥±‘í‰½É‘•Èµ‰½ÑÑ½´èÁô¹Ñ¥µ•±¥¹”µ‘½Ñíİ¥‘Ñ èÄÅÁàí¡•¥¡ĞèÄÅÁàí‰½É‘•ÈµÉ…‘¥ÕÌèÔÀ”í‰…­É½Õ¹èŒÔØàÕˆÔíµ…É¥¸µÑ½ÀèÕÁàí‰½àµÍ¡…‘½ÜèÀ€À€À€ÑÁà€”å˜Å˜áô¹Ñ¥µ•±¥¹”µ‘½Ğ¹…Ñ½ÈµÕÍ•Èµ…Ñ¥½¹í‰…­É½Õ¹èŒÄÜØå”Áô¹Ñ¥µ•±¥¹”µ‘½Ğ¹…Ñ½ÈµÑÉ¥…±Ù¥Í½Èµ…Ñ¥½¹í‰…­É½Õ¹èŒÄØáŒáô¹Ñ¥µ•±¥¹”µ‘½Ğ¹…Ñ½ÈµÁÉ½Ù¥‘•ÈµÉ•ÍÕ±Ñí‰…­É½Õ¹è„ØÕ„ĞÍô¹Ñ¥µ•±¥¹”µµ•Ñ…í‘¥ÍÁ±…äé™±•àí…ÀèÄÉÁàí…±¥¸µ¥Ñ•µÌé•¹Ñ•Èí™±•àµİÉ…ÀéİÉ…Áô¹Ñ¥µ•±¥¹”µµ•Ñ„‰í™½¹ĞµÍ¥é”èåÁàí±•ÑÑ•ÈµÍÁ…¥¹œè¸ÄÅ•´í½±½ÈèŒÔÔÜÀàİô¹Ñ¥µ•±¥¹”µµ•Ñ„Ñ¥µ•í™½¹ĞµÍ¥é”èÄÅÁàí½±½ÈèŒàĞäÉ„Åô¹Ñ¥µ•±¥¹” Íí™½¹ĞèÜÀÀ€ÄÕÁà5…¹É½Á”íµ…É¥¸èÙÁà€À€ÑÁáô¹Ñ¥µ•±¥¹”Áí™½¹ĞµÍ¥é”èÄÉÁàí±¥¹”µ¡•¥¡ĞèÄ¸ÔÔí½±½ÈèŒØØÜäáŒíµ…É¥¸èÁô¹Ñ¥µ•±¥¹”µ±¥¹­í‰…­É½Õ¹éÑÉ…¹ÍÁ…É•¹Ğí½±½ÈèŒÄÜØå”ÀíÁ…‘‘¥¹œèáÁà€Àí™½¹ĞµÍ¥é”èÄÅÁàí™½¹Ğµİ•¥¡ĞèÜÀÁô¹½µÁ…ĞµÑ¥µ•±¥¹•í‰½É‘•ÈèÀíÁ…‘‘¥¹œèÕÁà€ÑÁàí‰…­É½Õ¹éÑÉ…¹ÍÁ…É•¹Ñô¹½µÁ…ĞµÑ¥µ•±¥¹”…ÉÑ¥±•íÁ…‘‘¥¹œèÄÍÁà€Áô(¹‘…Ñ„µµ…ÑÉ¥áí‘¥ÍÁ±…äéÉ¥íÉ¥µÑ•µÁ±…Ñ”µ½±Õµ¹ÌéÉ•Á•…Ğ Ğ°Å™È¤í…ÀèÄÉÁàíµ…É¥¸µ‰½ÑÑ½´èÄáÁáô¹‘…Ñ„µµ…ÑÉ¥à…ÉÑ¥±”°¹Í•ÑÑ¥¹ÌµÁ…¹•±í‰…­É½Õ¹è™™˜í‰½É‘•ÈèÅÁàÍ½±¥€‘”Õ•˜í‰½É‘•ÈµÉ…‘¥ÕÌèÄÕÁàíÁ…‘‘¥¹œèÈÁÁáô¹‘…Ñ„µµ…ÑÉ¥àÍÙí½±½ÈèŒÄØàÔá…ô¹‘…Ñ„µµ…ÑÉ¥à Ì°¹Í•ÑÑ¥¹ÌµÁ…¹•° Íí™½¹ĞèÜÀÀ€ÄÙÁà5…¹É½Á”íµ…É¥¸èÄÅÁà€À€ÙÁáô¹‘…Ñ„µµ…ÑÉ¥àÀ°¹Í•ÑÑ¥¹ÌµÁ…¹•°Áí™½¹ĞµÍ¥é”èÄÉÁàí±¥¹”µ¡•¥¡ĞèÄ¸ÔÔí½±½ÈèŒØäİŒá”íµ…É¥¸èÁô¹Í•ÑÑ¥¹ÌµÁ…¹•±íµ…É¥¸µÑ½ÀèÄÑÁáô¹Í•ÑÑ¥¹Ìµ½¹¹•Ñ¥½¹í‘¥ÍÁ±…äé™±•àí©ÕÍÑ¥™äµ½¹Ñ•¹ĞéÍÁ…”µ‰•Ñİ••¸í…ÀèÈÁÁàí…±¥¸µ¥Ñ•µÌé•¹Ñ•ÈíÁ…‘‘¥¹œèÄÑÁà€Àí‰½É‘•ÈµÑ½ÀèÅÁàÍ½±¥€”Õ•‰˜Åô¹Í•ÑÑ¥¹Ìµ½¹¹•Ñ¥½¸ˆ°¹Í•ÑÑ¥¹Ìµ½¹¹•Ñ¥½¸ÍÁ…¸°¹Í•ÑÑ¥¹Ìµ½¹¹•Ñ¥½¸Íµ…±±í‘¥ÍÁ±…äé‰±½­ô¹Í•ÑÑ¥¹Ìµ½¹¹•Ñ¥½¸ÍÁ…¸°¹Í•ÑÑ¥¹Ìµ½¹¹•Ñ¥½¸Íµ…±±í™½¹ĞµÍ¥é”èÄÅÁàí½±½ÈèŒÙ„İäÀíµ…É¥¸µÑ½ÀèÍÁáô¹Í•ÑÑ¥¹Ìµ½¹¹•Ñ¥½¸ù‘¥Øé±…ÍĞµ¡¥±‘í‘¥ÍÁ±…äé™±•àí…±¥¸µ¥Ñ•µÌé•¹Ñ•Èí…ÀèáÁáô¹Í•ÑÑ¥¹Ìµ¹½Ñ•í‰½É‘•ÈµÑ½ÀèÅÁàÍ½±¥€”Õ•‰˜ÄíÁ…‘‘¥¹œµÑ½ÀèÄÉÁà…¥µÁ½ÉÑ…¹Ñô¹½¹ÑÉ½±ÌµÉ½Ü°¹‘…¹•ÈµÁ…¹•±í‘¥ÍÁ±…äé™±•àí…±¥¸µ¥Ñ•µÌé•¹Ñ•Èí©ÕÍÑ¥™äµ½¹Ñ•¹ĞéÍÁ…”µ‰•Ñİ••¸í…ÀèÈÑÁáô¹½¹ÑÉ½±ÌµÉ½Üù‘¥Ø°¹‘…¹•ÈµÁ…¹•°ù‘¥Ø°¹™••‘‰…¬µÁ…¹•°ù‘¥Ùí‘¥ÍÁ±…äé™±•àí…ÀèÄÍÁàí…±¥¸µ¥Ñ•µÌé™±•àµÍÑ…ÉÑô¹½¹ÑÉ½±ÌµÉ½ÜÍÙœ°¹‘…¹•ÈµÁ…¹•°ÍÙœ°¹™••‘‰…¬µÁ…¹•°ù‘¥ØùÍÙí™±•àèÀ€À…ÕÑ¼í½±½ÈèŒÄØàÔá…ô¹‘…¹•ÈµÁ…¹•±í‰½É‘•Èµ½±½Èè•™Œåô¹‘…¹•ÈµÁ…¹•°ÍÙí½±½Èè…ÑĞÍô¹‘•±•Ñ”µ½¹™¥Éµíµ…àµİ¥‘Ñ èÌÈÁÁàí‘¥ÍÁ±…äéÉ¥íÉ¥µÑ•µÁ±…Ñ”µ½±Õµ¹ÌèÅ™È€Å™Èí…ÀèáÁáô¹‘•±•Ñ”µ½¹™¥É´ˆ°¹‘•±•Ñ”µ½¹™¥É´ÍÁ…¹íÉ¥µ½±Õµ¸èÄ¼´Åô¹‘•±•Ñ”µ½¹™¥É´ÍÁ…¹í™½¹ĞµÍ¥é”èÄÅÁàí½±½ÈèŒİ„ÔÄÑô¹‘…¹•Èµ‰ÕÑÑ½¹í‰…­É½Õ¹è„àÍ˜Ìäí½±½Èè™™˜í‰½É‘•ÈµÉ…‘¥ÕÌèåÁàíÁ…‘‘¥¹œèÄÁÁàí™½¹Ğµİ•¥¡ĞèÜÀÁô¹™••‘‰…¬µÁ…¹•±í‘¥ÍÁ±…äéÉ¥íÉ¥µÑ•µÁ±…Ñ”µ½±Õµ¹Ìè¸İ™È€Ä¸Í™Èí…ÀèÈÑÁáô¹™••‘‰…¬µÁ…¹•°™½Éµí‰½É‘•ÈèÀíÁ…‘‘¥¹œèÁô¹™••‘‰…¬µÁ…¹•°™½É´‰ÕÑÑ½¹í©ÕÍÑ¥™äµÍ•±˜éÍÑ…ÉÑô¹¹…Ø°¹ÁÕ‰±¥Œµ¡•…‰ÕÑÑ½¸°¹ÁÕ‰±¥Œµ…±±½ÕĞ‰ÕÑÑ½¸°¹É•Á½ÉĞµ™½É´‰ÕÑÑ½¸°¹™••‘‰…¬µÁ…¹•°‰ÕÑÑ½¸°¹¹½Ñ¥”‰ÕÑÑ½¸°¹Í•ÑÑ¥¹ÌµÁ…¹•°‰ÕÑÑ½¹íµ¥¸µ¡•¥¡ĞèĞÑÁáõÍ•±•Ğé™½ÕÌµÙ¥Í¥‰±”±Ñ•áÑ…É•„é™½ÕÌµÙ¥Í¥‰±”±ÍÕµµ…Éäé™½ÕÌµÙ¥Í¥‰±”±„é™½ÕÌµÙ¥Í¥‰±•í½ÕÑ±¥¹”èÍÁàÍ½±¥€Œàáˆá™˜í½ÕÑ±¥¹”µ½™™Í•ĞèÉÁáô)µ•‘¥„¡µ…àµİ¥‘Ñ èÄÀÀÁÁà¥ì¹±¥™•å±”µÉ¥‘íÉ¥µÑ•µÁ±…Ñ”µ½±Õµ¹ÌéÉ•Á•…Ğ È°Å™È¥ô¹ÁÕ‰±¥Œµ™½½Ñ•ÉíÉ¥µÑ•µÁ±…Ñ”µ½±Õµ¹ÌèÅ™È€Å™Éô¹‘…Ñ„µµ…ÑÉ¥áíÉ¥µÑ•µÁ±…Ñ”µ½±Õµ¹ÌèÅ™È€Å™Éô¹Í•ÕÉ¥ÑäµÉ•Á½ÉĞ°¹™••‘‰…¬µÁ…¹•±íÉ¥µÑ•µÁ±…Ñ”µ½±Õµ¹ÌèÅ™Éõô)µ•‘¥„¡µ…àµİ¥‘Ñ èÜÀÁÁà¥ì¹ÁÕ‰±¥Œµ¡•…‘í¡•¥¡Ğé…ÕÑ¼íµ¥¸µ¡•¥¡ĞèÜÁÁàíÁ…‘‘¥¹œèÄÉÁà€ÄÙÁáô¹ÁÕ‰±¥Œµ¡•…€¹İ½É‘µ…É­íİ¥‘Ñ èÄĞÕÁáô¹ÁÕ‰±¥Œµ¡•…¹…Ùí…ÀèáÁáô¹ÁÕ‰±¥Œµ¡•…¹…Ø…í‘¥ÍÁ±…äé¹½¹•ô¹ÁÕ‰±¥Œµ¡•É½íÁ…‘‘¥¹œèÔáÁà€ÈÁÁà€ÌÑÁáô¹±¥™•å±”µÉ¥°¹ÑÉÕÑ µÉ¥°¹ÁÉ½Ù¥‘•Èµ±••¹‘íÉ¥µÑ•µÁ±…Ñ”µ½±Õµ¹ÌèÅ™ÈíÁ…‘‘¥¹œµ±•™ĞèÄÙÁàíÁ…‘‘¥¹œµÉ¥¡ĞèÄÙÁáô¹Í•ÕÉ¥Ñäµ±¥ÍĞ°¹ÍÕ‰ÁÉ½•ÍÍ½Èµ±¥ÍĞ°¹Í•ÕÉ¥ÑäµÉ•Á½ÉÑíÁ…‘‘¥¹œµ±•™ĞèÄÙÁàíÁ…‘‘¥¹œµÉ¥¡ĞèÄÙÁáô¹ÁÕ‰±¥Œµ…±±½ÕÑíµ…É¥¸µ±•™ĞèÄÙÁàíµ…É¥¸µÉ¥¡ĞèÄÙÁáô¹ÁÕ‰±¥Œµ™½½Ñ•ÉíÉ¥µÑ•µÁ±…Ñ”µ½±Õµ¹ÌèÅ™ÈíÁ…‘‘¥¹œèÌÑÁà€ÈÉÁáô¹¹½Ñ¥•íÉ¥µÑ•µÁ±…Ñ”µ½±Õµ¹ÌèÌáÁà€Å™Éô¹¹½Ñ¥”µ…Ñ¥½¹ÍíÉ¥µ½±Õµ¸èÉô¹‘…Ñ„µµ…ÑÉ¥áíÉ¥µÑ•µÁ±…Ñ”µ½±Õµ¹ÌèÅ™Éô¹½¹ÑÉ½±ÌµÉ½Ü°¹‘…¹•ÈµÁ…¹•°°¹Í•ÑÑ¥¹Ìµ½¹¹•Ñ¥½¹í…±¥¸µ¥Ñ•µÌé™±•àµÍÑ…ÉĞí™±•àµ‘¥É•Ñ¥½¸é½±Õµ¹ô¹™••‘‰…¬µÁ…¹•±íÉ¥µÑ•µÁ±…Ñ”µ½±Õµ¹ÌèÅ™Éô¹‘•±•Ñ”µ½¹™¥Éµíµ…àµİ¥‘Ñ é¹½¹•ô¹…Í¥‘”µ¡•±Áíµ…É¥¸µÑ½ÀèÄÁÁáô¹Ñ¥µ•±¥¹•íÁ…‘‘¥¹œèáÁà€ÄÑÁáõô)µ•‘¥„¡ÁÉ•™•ÉÌµÉ•‘Õ•µµ½Ñ¥½¸éÉ•‘Õ”¥ì¨°¨èé‰•™½É”°¨èé…™Ñ•ÉíÍÉ½±°µ‰•¡…Ù¥½Èé…ÕÑ¼…¥µÁ½ÉÑ…¹Ğí…¹¥µ…Ñ¥½¸µ‘ÕÉ…Ñ¥½¸è¸ÀÅµÌ…¥µÁ½ÉÑ…¹Ğí…¹¥µ…Ñ¥½¸µ¥Ñ•É…Ñ¥½¸µ½Õ¹ĞèÄ…¥µÁ½ÉÑ…¹ĞíÑÉ…¹Í¥Ñ¥½¸µ‘ÕÉ…Ñ¥½¸è¸ÀÅµÌ…¥µÁ½ÉÑ…¹Ñõô(
