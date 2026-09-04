@@ -102,14 +102,14 @@ Description: Verifies Trialvisor Pro is granted only from verified Stripe test-m
 
 Setup:
 1. Use only the dedicated Trialvisor Stripe sandbox and the existing Trialvisor Pro monthly and annual Prices.
-2. Attach Stripe credentials and Price IDs through AppDeploy private secrets.
+2. Attach Stripe credentials through AppDeploy private secrets.
 
 Steps:
 1. From a Free tenant, choose monthly, complete prebuilt Checkout with a Stripe test payment method, and return to Trialvisor.
-2. Confirm the browser return alone does not grant Pro; deliver the signed subscription event and confirm durable Pro access.
-3. Open Customer Portal, cancel at period end, confirm Pro remains through the paid period, then advance the sandbox clock through expiration and confirm a safe return to Free.
+2. Before webhook completion, attempt a second Checkout and confirm Trialvisor blocks it; then confirm the browser return alone does not grant Pro, deliver the signed subscription event before the Checkout completion event, and confirm durable Pro access. Deliver Checkout completion afterward and confirm it cannot downgrade or duplicate the entitlement.
+3. Confirm the current renewal date comes from the subscription item, then open Customer Portal, cancel at period end, confirm Pro remains through the paid period, then advance the sandbox clock through expiration and confirm a safe return to Free.
 4. Repeat with the annual Price, then test renewal, payment failure, past_due/unpaid state, supported reactivation, Checkout abandonment, and an invalid Price ID.
 5. Replay an already processed webhook and send a webhook with an invalid signature.
 6. Attempt Checkout and Portal access while tenant A's billing record contains tenant B's Stripe Customer ID, and call both billing endpoints without authentication.
 
-Expected: Checkout creates or reuses only the authenticated tenant's Stripe Customer. Both Checkout reuse and Portal creation revalidate the global customer-to-tenant binding before contacting Stripe. Signed, allowlisted active/trialing subscription events alone grant Pro. Replayed events are harmless, invalid signatures and unauthorized endpoints are rejected, past_due/unpaid/expired subscriptions do not retain Pro, cancellation at period end preserves entitlement only through the paid period, and no live-mode Stripe object is created or modified.
+Expected: Trialvisor permits only one unresolved Checkout per tenant, preventing monthly and annual subscriptions from being created concurrently even if webhooks are delayed. Checkout creates or reuses only the authenticated tenant's Stripe Customer. Both Checkout reuse and Portal creation revalidate the global customer-to-tenant binding before contacting Stripe. Signed, allowlisted active/trialing subscription events alone grant Pro even when Stripe delivers subscription and Checkout events out of order, while unrelated Checkout metadata or a mismatched customer/subscription is rejected. Replayed events are harmless, invalid signatures and unauthorized endpoints are rejected, past_due/unpaid/expired subscriptions do not retain Pro, cancellation at period end preserves entitlement only through the paid period, and no live-mode Stripe object is created or modified.

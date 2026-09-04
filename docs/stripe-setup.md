@@ -1,6 +1,6 @@
 # Stripe test-mode setup
 
-Trialvisor billing is deployed but intentionally disabled until all four AppDeploy secrets are attached. Complete this in a Stripe sandbox before considering live mode.
+Trialvisor billing is deployed in test mode and becomes configured only when both AppDeploy billing secrets are attached. Complete and verify the full lifecycle in the dedicated Trialvisor sandbox before considering live mode.
 
 ## 1. Create the Trialvisor Pro product
 
@@ -24,7 +24,7 @@ Pricing is a commercial decision. Keep the monthly and annual Prices attached to
 
 1. Open **Developers → API keys → Restricted keys** in the sandbox.
 2. Create a key named **Trialvisor AppDeploy test billing**.
-3. Grant only the permissions required to create Checkout Sessions and Billing Portal Sessions and to access supporting Customers, Subscriptions, Products, and Prices.
+3. Set every resource to None, then grant Write only for Checkout Sessions and Customer Portal/Billing Portal Sessions. The deployed backend does not directly call Customers, Subscriptions, Products, Prices, Events, or Webhook Endpoints.
 4. Do not grant access to payouts, balances, disputes, issuing, treasury, connect accounts, or unrelated payment operations.
 5. Add an IP restriction if AppDeploy provides stable outbound IP addresses. Otherwise retain the least-privilege resource restrictions.
 6. Store the resulting `rk_...` value only through AppDeploy private secret entry as `STRIPE_RESTRICTED_KEY`.
@@ -55,14 +55,7 @@ Use two separate AppDeploy private secret-entry links:
 - `STRIPE_RESTRICTED_KEY`
 - `STRIPE_WEBHOOK_SECRET`
 
-The connector-verified test Price IDs are server-side allowlist constants in `backend/billing.ts`:
-
-- Monthly: `price_1UBuOfGTXvZ0TX3Afx0TbBsm`
-- Annual: `price_1UBuSLGTXvZ0TX3AtAl720ek`
-
-Both belong to test-mode product `prod_VCJ0D81ackUsrY`. Price IDs are identifiers rather than credentials, so they do not require secret storage. Re-verify the product, amounts, currency, intervals, active state, and `livemode=false` before any deployment that changes these identifiers.
-
-Never paste any of these values into chat, GitHub, Figma, logs, or frontend configuration.
+The approved sandbox Price IDs are server-side configuration identifiers in the deployed billing module, not secret credentials. Never paste restricted keys or webhook signing secrets into chat, GitHub, Figma, logs, or frontend configuration.
 
 ## 6. Required validation before live mode
 
@@ -80,9 +73,10 @@ Never paste any of these values into chat, GitHub, Figma, logs, or frontend conf
 
 - The browser redirect never grants Pro. Only a signature-verified subscription event can change the server-side entitlement.
 - An active subscription grants Pro only when its Price ID matches one of the two configured Trialvisor Pro Prices.
-- A Stripe customer is globally bound to one Trialvisor tenant only by the completed, server-created Checkout session. Subscription events cannot create or cross that binding; an out-of-order subscription event is retried until its Checkout binding exists.
-- Duplicate events are recorded and ignored; older subscription events cannot overwrite a newer entitlement state.
-- Checkout creation is limited to one session per tenant per minute to reduce accidental duplicates and abuse.
+- A Stripe customer is globally bound to one Trialvisor tenant only after a server-created Checkout record exists. A signed subscription event may establish that binding before Checkout completion arrives, but only when its Trialvisor metadata, approved Price, customer, subscription, and tenant ownership checks all pass.
+- Duplicate events are recorded and ignored. Checkout, subscription, and invoice ordering are tracked independently so an out-of-order event from one object family cannot suppress a legitimate event from another; older subscription updates cannot overwrite newer subscription state.
+- Renewal dates come from the subscription item's current period end, matching the deployed Stripe API version.
+- Checkout creation is limited to one unresolved session per tenant. A completed session blocks another subscription while its signed entitlement event is pending; an older still-open session is expired before replacement. A one-minute request throttle remains as an additional abuse guard.
 - Existing authorized cancellation jobs are not deleted or silently abandoned when billing changes. A future feature gate must distinguish blocking new paid actions from honoring already-authorized protection obligations.
 
 ## Tax safety
