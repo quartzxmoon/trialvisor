@@ -5,7 +5,7 @@ const APP_URL='https://trialvisor-m8vrsu.v2.appdeploy.ai/';
 const STRIPE_PRICE_PRO_MONTHLY='price_1UBuOfGTXvZ0TX3Afx0TbBsm';
 const STRIPE_PRICE_PRO_ANNUAL='price_1UBuSLGTXvZ0TX3AtAl720ek';
 const REQUIRED_SECRETS=['STRIPE_RESTRICTED_KEY','STRIPE_WEBHOOK_SECRET'];
-const ACTIVE_STATUSES=new Set(['active','trialing']);
+export const ACTIVE_STATUSES=new Set(['active','trialing']);
 const APPROVED_PRICE_IDS=new Set([STRIPE_PRICE_PRO_MONTHLY,STRIPE_PRICE_PRO_ANNUAL]);
 const CHECKOUT_BLOCKED_STATUSES=new Set(['active','trialing','pending','past_due','unpaid','paused','incomplete','unrecognized_price']);
 
@@ -42,7 +42,7 @@ const stripeClient=async()=>new Stripe(await secrets.readSecret('STRIPE_RESTRICT
 });
 const configuredNames=async()=>new Set(await secrets.listSecretNames());
 export const billingConfigured=async()=>{const names=await configuredNames();return REQUIRED_SECRETS.every(name=>names.has(name))};
-const currentBilling=async(userId:string)=>(await db.list<BillingRecord>(billingTable(userId),{limit:5})).items.sort((a,b)=>b.updatedAt.localeCompare(a.updatedAt))[0];
+export const currentBilling=async(userId:string)=>(await db.list<BillingRecord>(billingTable(userId),{limit:5})).items.sort((a,b)=>b.updatedAt.localeCompare(a.updatedAt))[0];
 const saveBilling=async(userId:string,patch:Partial<BillingRecord>)=>{
   const current=await currentBilling(userId),next:BillingRecord={
     userId,
@@ -162,8 +162,9 @@ const applyStripeEvent=async(event:Stripe.Event)=>{
     if((prior.lastCheckoutEventCreated||0)>event.created)return;
     if(prior.customerId&&prior.customerId!==customerId)throw new Error('stripe_customer_ownership_mismatch');
     await ensureCustomerBinding(customerId,userId,true);
-    await saveBilling(userId,{customerId,subscriptionId:safeId(session.subscription,'sub_'),status:'pending',plan:'FREE',cadence:session.metadata?.trialvisor_cadence==='annual'?'annual':'monthly',lastStripeEventId:event.id,lastStripeEventCreated:event.created,lastCheckoutEventCreated:event.created});
-    await billingNotice(userId,'Checkout completed','Trialvisor is waiting for Stripe’s signed subscription event before activating paid access.','info');
+    const isAlreadyActive=!!prior&&(ACTIVE_STATUSES.has(prior.status)||prior.plan==='PRO');
+    await saveBilling(userId,{customerId,subscriptionId:safeId(session.subscription,'sub_')||prior.subscriptionId,status:isAlreadyActive?prior.status:'pending',plan:isAlreadyActive?'PRO':'FREE',cadence:session.metadata?.trialvisor_cadence==='annual'?'annual':'monthly',lastStripeEventId:event.id,lastStripeEventCreated:event.created,lastCheckoutEventCreated:event.created});
+    if(!isAlreadyActive){await billingNotice(userId,'Checkout completed','Trialvisor is waiting for Stripe’s signed subscription event before activating paid access.','info')}
     return;
   }
   if(event.type==='customer.subscription.created'||event.type==='customer.subscription.updated'||event.type==='customer.subscription.deleted'){
