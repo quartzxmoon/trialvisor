@@ -1,6 +1,7 @@
 import { router, json, error, requireAuth, db, notifications, secrets } from '@appdeploy/sdk';
 import { ACTIVE_STATUSES, billingConfigured, billingSnapshot, createCheckout, createPortal, currentBilling, handleStripeWebhook, hasProEntitlement } from './billing';
 import { canvaCancellationEvidence, classifySignal, providerSupport, type GmailMessage, type ProviderSupport } from './provider-signals';
+import { deleteAllRecords as deleteAllPagedRecords, listAllMatching } from './paged-records';
 type State='REVIEW_REQUIRED'|'AUTO_CANCEL_ENABLED'|'DECISION_PENDING'|'KEEP_REQUESTED'|'CANCELLATION_RUNNING'|'CANCELLATION_NEEDS_USER'|'CANCELED_CONFIRMED';
 type Trial={userId:string;provider:string;plan:string;price:number;currency:string;trialEnd:string;safeDeadline:string;plannedExecution:string;state:State;tier:string;support?:ProviderSupport;confidence:number;confidenceBand?:'HIGH'|'MEDIUM'|'LOW';sourceRef?:{provider:'google'|'microsoft';messageId:string;threadId:string;receivedAt?:string};verificationRef?:{provider:'google';messageId:string;threadId:string;receivedAt?:string};evidence?:string;nextAction?:string;authorizationAt?:string;providerActionAt?:string;cancellationUrl?:string};
 type Job={userId:string;trialId:string;kind:'DECISION'|'CANCEL';dueAt:string;status:'PENDING'|'REVOKED'|'DONE';attempts:number;idempotencyKey:string};
@@ -139,30 +140,8 @@ const redirect=(location:string)=>({statusCode:302,headers:{Location:location,'C
 const table=(u:string,n:string)=>n+':'+u;
 const audit=async(userId:string,trialId:string,type:string,detail:string)=>{await db.add(table(userId,'audit'),[{userId,trialId,type,detail,at:new Date().toISOString()}])};
 const addNotice=async(userId:string,notice:Omit<PersistentNotice,'userId'|'at'|'readAt'>)=>{await db.add(table(userId,'notifications'),[{userId,...notice,at:new Date().toISOString(),readAt:null}])};
-const listAllJobs=async(predicate:(j:Job&{id:string})=>boolean,limit:number=500):Promise<Array<Job&{id:string}>>=>{
-  const results:Array<Job&{id:string}>=[];
-  let nextToken:string|undefined=undefined;
-  do{
-    const page: { items: Array<Job & { id: string }>; nextToken?: string } = await db.list<Job>('jobs',{limit:100,nextToken});
-    for(const item of page.items||[]){
-      if(predicate(item)){
-        results.push(item);
-        if(results.length>=limit)return results;
-      }
-    }
-    nextToken=page.nextToken;
-  }while(nextToken);
-  return results;
-};
-const deleteAllRecords=async(name:string)=>{
-  for(let batch=0;batch<1000;batch++){
-    const items=(await db.list(name,{limit:100})).items;
-    if(!items.length)return;
-    const deleted=await db.delete(name,items.map(item=>item.id));
-    if(deleted.some(ok=>!ok))throw new Error('account_delete_incomplete');
-  }
-  throw new Error('account_delete_limit_exceeded');
-};
+const listAllJobs=(predicate:(j:Job&{id:string})=>boolean,limit=500)=>listAllMatching<Job&{id:string}>(db,'jobs',predicate,limit);
+const deleteAllRecords=(name:string)=>deleteAllPagedRecords(db,name);
 const activityTitle:Record<string,string>={TRIAL_DETECTED:'Trial detected',TRIAL_CREATED:'Trial added for review',AUTHORIZATION_GRANTED:'Protect authorization recorded',DECISION_NOTIFICATION_SENT:'Keep or Cancel decision requested',NOTIFICATION_SENT:'Decision reminder sent',KEEP_SELECTED:'Keep selected',CANCEL_SELECTED:'Cancellation queued',CANCELLATION_STARTED:'Cancellation attempted',ASSIST_REQUIRED:'Action Required raised',PROVIDER_ADAPTER_UNAVAILABLE:'Provider automation unavailable',PROVIDER_STEP_REPORTED:'Provider steps completed',CANCELED_CONFIRMED:'Cancellation verified',CANCELLATION_FAILED:'Cancellation failed',ACCOUNT_CONNECTED:'Account connected',ACCOUNT_DISCONNECTED:'Account disconnected',GMAIL_SYNC_COMPLETED:'Inbox synchronization completed',GOOGLE_REAUTH_REQUIRED:'Provider authentication required'};
 const activityActor=(type:string):'USER ACTION'|'TRIALVISOR ACTION'|'PROVIDER RESULT'=>['TRIAL_CREATED','AUTHORIZATION_GRANTED','KEEP_SELECTED','CANCEL_SELECTED','PROVIDER_STEP_REPORTED'].includes(type)?'USER ACTION':['CANCELED_CONFIRMED','CANCELLATION_FAILED','GOOGLE_REAUTH_REQUIRED'].includes(type)?'PROVIDER RESULT':'TRIALVISOR ACTION';
 const customerActivity=(a:any)=>({id:a.id,type:a.type,trialId:a.trialId,title:activityTitle[a.type]||'Protection activity',detail:String(a.detail||'Activity recorded.').slice(0,500),at:a.at,actor:activityActor(a.type)});

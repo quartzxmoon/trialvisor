@@ -11,6 +11,7 @@
     "backend/index.ts",
     "backend/billing.ts",
     "backend/provider-signals.ts",
+    "backend/paged-records.ts",
     "backend/appdeploy-sdk.d.ts"
   ]
 }
