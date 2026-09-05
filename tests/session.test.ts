@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  cleanupSessions,
   evaluateSession,
   getSessionId,
   initSession,
@@ -9,6 +10,7 @@ import {
   SESSION_ABSOLUTE_LIFETIME_MS,
   SESSION_IDLE_TIMEOUT_MS,
   SENSITIVE_ACTION_MAX_AGE_MS,
+  INVALIDATED_SESSION_RETENTION_MS,
   type SessionDatabase,
   type UserSession
 } from '../backend/session.ts';
@@ -66,24 +68,271 @@ const createMockDatabase = (seed: Array<{ table: string; id: string; record: Rec
   return { database, store };
 };
 
-test('A. VALID SESSION: fresh session succeeds on authenticated request', async () => {
-  const { database } = createMockDatabase();
-  const init = await initSession(database, 'user-1', '2026-09-05T12:00:00.000Z');
-  const now = new Date('2026-09-05T12:05:00.000Z').getTime();
+test('A. SINGLE-ACTIVE-SESSION FALLBACK REMOVED: missing session ID is rejected even if exactly one active session exists', async () => {
+  const baseTime = new Date('2026-09-05T12:00:00.000Z').getTime();
+  const { database } = createMockDatabase([
+    { table: sessionTable('user-1'), id: 'sole-session', record: { userId: 'user-1', createdAt: new Date(baseTime).toISOString(), lastActiveAt: new Date(baseTime).toISOString() } }
+  ]);
 
-  const res = await evaluateSession(database, 'user-1', init.sessionId!, { touchActivity: true }, now);
-  assert.equal(res.ok, true);
-  if (res.ok) {
-    assert.equal(res.session.userId, 'user-1');
-    assert.equal(res.session.id, init.sessionId);
-    assert.equal(res.session.lastActiveAt, new Date(now).toISOString());
+  // Request with no sessionId (e.g. missing X-Session-Id header) must be rejected
+  const res = await evaluateSession(database, 'user-1', undefined, { touchActivity: true }, baseTime + 1000);
+  assert.equal(res.ok, false);
+  if (!res.ok) {
+    assert.equal(res.status, 401);
+    assert.equal(res.code, 'session_expired');
+  }
+
+  // Whitespace-only sessionId must also be rejected
+  const resWhitespace = await evaluateSession(database, 'user-1', '   ', { touchActivity: true }, baseTime + 1000);
+  assert.equal(resWhitespace.ok, false);
+  if (!resWhitespace.ok) {
+    assert.equal(resWhitespace.status, 401);
+    assert.equal(resWhitespace.code, 'session_expired');
   }
 });
 
-test('B. IDLE TIMEOUT: >30m inactive returns 401 session_idle_timeout and invalidates record', async () => {
+test('B. EXACT SESSION BINDING: valid user + exact active session ID succeeds', async () => {
+  const baseTime = new Date('2026-09-05T12:00:00.000Z').getTime();
+  const { database } = createMockDatabase([
+    { table: sessionTable('user-1'), id: 'exact-sid-123', record: { userId: 'user-1', createdAt: new Date(baseTime).toISOString(), lastActiveAt: new Date(baseTime).toISOString() } }
+  ]);
+
+  const res = await evaluateSession(database, 'user-1', 'exact-sid-123', { touchActivity: true }, baseTime + 2000);
+  assert.equal(res.ok, true);
+  if (res.ok) {
+    assert.equal(res.session.id, 'exact-sid-123');
+    assert.equal(res.session.userId, 'user-1');
+  }
+});
+
+test('C. NONEXISTENT SESSION ID: valid user with nonexistent session ID is rejected', async () => {
+  const baseTime = new Date('2026-09-05T12:00:00.000Z').getTime();
+  const { database } = createMockDatabase([
+    { table: sessionTable('user-1'), id: 'real-session', record: { userId: 'user-1', createdAt: new Date(baseTime).toISOString(), lastActiveAt: new Date(baseTime).toISOString() } }
+  ]);
+
+  const res = await evaluateSession(database, 'user-1', 'nonexistent-session', { touchActivity: true }, baseTime + 1000);
+  assert.equal(res.ok, false);
+  if (!res.ok) {
+    assert.equal(res.status, 401);
+    assert.equal(res.code, 'session_expired');
+  }
+});
+
+test('D. TENANT ISOLATION: user A presenting session ID of user B is rejected', async () => {
+  const baseTime = new Date('2026-09-05T12:00:00.000Z').getTime();
+  const { database, store } = createMockDatabase([
+    { table: sessionTable('user-B'), id: 'sess-user-B', record: { userId: 'user-B', createdAt: new Date(baseTime).toISOString(), lastActiveAt: new Date(baseTime).toISOString() } }
+  ]);
+
+  // user-A tries to authenticate using user-B's session ID
+  const res = await evaluateSession(database, 'user-A', 'sess-user-B', { touchActivity: true }, baseTime + 5000);
+  assert.equal(res.ok, false);
+  if (!res.ok) {
+    assert.equal(res.status, 401);
+    assert.equal(res.code, 'session_expired');
+  }
+
+  // Confirm user-B's record was never touched
+  const userBRecord = store.get(sessionTable('user-B'))!.get('sess-user-B') as UserSession;
+  assert.equal(userBRecord.lastActiveAt, new Date(baseTime).toISOString());
+});
+
+test('E. SESSION INITIALIZATION: creates new unique session without requiring existing session ID', async () => {
+  const { database } = createMockDatabase();
+  const init1 = await initSession(database, 'user-1', '2026-09-05T12:00:00.000Z');
+  assert.ok(init1.sessionId, 'must generate sessionId');
+  assert.equal(init1.idleTimeoutMs, SESSION_IDLE_TIMEOUT_MS);
+  assert.equal(init1.absoluteLifetimeMs, SESSION_ABSOLUTE_LIFETIME_MS);
+
+  // A second sign-in from another device creates a distinct unique session
+  const init2 = await initSession(database, 'user-1', '2026-09-05T12:01:00.000Z');
+  assert.ok(init2.sessionId, 'must generate second sessionId');
+  assert.notEqual(init1.sessionId, init2.sessionId, 'sessions must be independently unique and not reused');
+});
+
+test('F. PAGINATED CLEANUP: paginates through 130 records and cleans stale sessions beyond page boundary', async () => {
+  const nowTime = new Date('2026-09-05T12:00:00.000Z').getTime();
+  const seed: Array<{ table: string; id: string; record: Record<string, unknown> }> = [];
+
+  // 1. 30 active sessions (<12h old) -> PRESERVE
+  for (let i = 0; i < 30; i++) {
+    seed.push({
+      table: sessionTable('user-1'),
+      id: `active-${i}`,
+      record: {
+        userId: 'user-1',
+        createdAt: new Date(nowTime - 2 * 3600000).toISOString(),
+        lastActiveAt: new Date(nowTime - 10 * 60000).toISOString()
+      }
+    });
+  }
+
+  // 2. 50 expired sessions (>12h old, absolute timeout) -> DELETE
+  for (let i = 0; i < 50; i++) {
+    seed.push({
+      table: sessionTable('user-1'),
+      id: `expired-${i}`,
+      record: {
+        userId: 'user-1',
+        createdAt: new Date(nowTime - 14 * 3600000).toISOString(),
+        lastActiveAt: new Date(nowTime - 13 * 3600000).toISOString()
+      }
+    });
+  }
+
+  // 3. 20 recent invalidated sessions (<1h since invalidatedAt) -> PRESERVE for audit/replay
+  for (let i = 0; i < 20; i++) {
+    seed.push({
+      table: sessionTable('user-1'),
+      id: `inval-recent-${i}`,
+      record: {
+        userId: 'user-1',
+        createdAt: new Date(nowTime - 2 * 3600000).toISOString(),
+        lastActiveAt: new Date(nowTime - 45 * 60000).toISOString(),
+        invalidatedAt: new Date(nowTime - 30 * 60000).toISOString(),
+        reason: 'user_signout'
+      }
+    });
+  }
+
+  // 4. 30 stale invalidated sessions (>1h since invalidatedAt) -> DELETE (positioned beyond offset 100)
+  for (let i = 0; i < 30; i++) {
+    seed.push({
+      table: sessionTable('user-1'),
+      id: `inval-stale-${i}`,
+      record: {
+        userId: 'user-1',
+        createdAt: new Date(nowTime - 5 * 3600000).toISOString(),
+        lastActiveAt: new Date(nowTime - 4 * 3600000).toISOString(),
+        invalidatedAt: new Date(nowTime - 2 * 3600000).toISOString(),
+        reason: 'user_signout'
+      }
+    });
+  }
+
+  // Total records: 30 + 50 + 20 + 30 = 130 records (>125)
+  assert.equal(seed.length, 130);
+  const { database, store } = createMockDatabase(seed);
+
+  await cleanupSessions(database, 'user-1', nowTime);
+
+  const remaining = store.get(sessionTable('user-1'))!;
+  // Preserved: 30 active + 20 recent invalidated = 50
+  assert.equal(remaining.size, 50, 'Exactly 50 records should remain');
+  for (let i = 0; i < 30; i++) assert.ok(remaining.has(`active-${i}`), `active-${i} must be preserved`);
+  for (let i = 0; i < 20; i++) assert.ok(remaining.has(`inval-recent-${i}`), `inval-recent-${i} must be preserved`);
+  for (let i = 0; i < 50; i++) assert.ok(!remaining.has(`expired-${i}`), `expired-${i} must be deleted`);
+  for (let i = 0; i < 30; i++) assert.ok(!remaining.has(`inval-stale-${i}`), `inval-stale-${i} must be deleted`);
+});
+
+test('G. PAGINATED SIGN OUT EVERYWHERE: invalidates all 75+ active sessions across page boundaries', async () => {
+  const baseTime = new Date('2026-09-05T12:00:00.000Z').getTime();
+  const seed: Array<{ table: string; id: string; record: Record<string, unknown> }> = [];
+
+  // 80 active sessions for user-1 (>75)
+  for (let i = 0; i < 80; i++) {
+    seed.push({
+      table: sessionTable('user-1'),
+      id: `u1-sess-${i}`,
+      record: { userId: 'user-1', createdAt: new Date(baseTime).toISOString(), lastActiveAt: new Date(baseTime).toISOString() }
+    });
+  }
+
+  // 10 active sessions for user-2 (tenant isolation check)
+  for (let i = 0; i < 10; i++) {
+    seed.push({
+      table: sessionTable('user-2'),
+      id: `u2-sess-${i}`,
+      record: { userId: 'user-2', createdAt: new Date(baseTime).toISOString(), lastActiveAt: new Date(baseTime).toISOString() }
+    });
+  }
+
+  const { database, store } = createMockDatabase(seed);
+
+  const result = await invalidateSession(database, 'user-1', undefined, true, '2026-09-05T12:30:00.000Z');
+  assert.equal(result.ok, true);
+  assert.equal(result.invalidatedCount, 80);
+
+  // Verify all 80 user-1 sessions are invalidated
+  const u1Table = store.get(sessionTable('user-1'))!;
+  for (let i = 0; i < 80; i++) {
+    const s = u1Table.get(`u1-sess-${i}`) as UserSession;
+    assert.ok(s.invalidatedAt, `u1-sess-${i} must be invalidated`);
+    assert.equal(s.reason, 'user_signout');
+  }
+
+  // Verify user-2 sessions were completely untouched
+  const u2Table = store.get(sessionTable('user-2'))!;
+  for (let i = 0; i < 10; i++) {
+    const s = u2Table.get(`u2-sess-${i}`) as UserSession;
+    assert.equal(s.invalidatedAt, undefined, `user-2 session u2-sess-${i} must remain active`);
+  }
+});
+
+test('H. SAFE SINGLE-SESSION INVALIDATION: missing sessionId does not invalidate all sessions', async () => {
+  const baseTime = new Date('2026-09-05T12:00:00.000Z').getTime();
+  const seed: Array<{ table: string; id: string; record: Record<string, unknown> }> = [
+    { table: sessionTable('user-1'), id: 'dev-1', record: { userId: 'user-1', createdAt: new Date(baseTime).toISOString(), lastActiveAt: new Date(baseTime).toISOString() } },
+    { table: sessionTable('user-1'), id: 'dev-2', record: { userId: 'user-1', createdAt: new Date(baseTime).toISOString(), lastActiveAt: new Date(baseTime).toISOString() } }
+  ];
+
+  const { database, store } = createMockDatabase(seed);
+
+  // Call invalidate without sessionId and without everywhere: true
+  const res = await invalidateSession(database, 'user-1', undefined, false, '2026-09-05T12:30:00.000Z');
+  assert.equal(res.ok, false);
+  assert.equal(res.error, 'session_id_required');
+
+  // Verify NEITHER session was invalidated
+  const u1Table = store.get(sessionTable('user-1'))!;
+  const d1 = u1Table.get('dev-1') as UserSession;
+  const d2 = u1Table.get('dev-2') as UserSession;
+  assert.equal(d1.invalidatedAt, undefined, 'dev-1 must remain active');
+  assert.equal(d2.invalidatedAt, undefined, 'dev-2 must remain active');
+});
+
+test('I. SIGN OUT EVERYWHERE: everywhere=true invalidates only authenticated tenant sessions', async () => {
+  const baseTime = new Date('2026-09-05T12:00:00.000Z').getTime();
+  const { database, store } = createMockDatabase([
+    { table: sessionTable('user-1'), id: 'sess-1', record: { userId: 'user-1', createdAt: new Date(baseTime).toISOString(), lastActiveAt: new Date(baseTime).toISOString() } },
+    { table: sessionTable('user-1'), id: 'sess-2', record: { userId: 'user-1', createdAt: new Date(baseTime).toISOString(), lastActiveAt: new Date(baseTime).toISOString() } },
+    { table: sessionTable('user-2'), id: 'sess-other', record: { userId: 'user-2', createdAt: new Date(baseTime).toISOString(), lastActiveAt: new Date(baseTime).toISOString() } }
+  ]);
+
+  const res = await invalidateSession(database, 'user-1', undefined, true, '2026-09-05T12:15:00.000Z');
+  assert.equal(res.ok, true);
+
+  const s1 = store.get(sessionTable('user-1'))!.get('sess-1') as UserSession;
+  const s2 = store.get(sessionTable('user-1'))!.get('sess-2') as UserSession;
+  const sOther = store.get(sessionTable('user-2'))!.get('sess-other') as UserSession;
+
+  assert.ok(s1.invalidatedAt, 'user-1 sess-1 must be invalidated');
+  assert.ok(s2.invalidatedAt, 'user-1 sess-2 must be invalidated');
+  assert.equal(sOther.invalidatedAt, undefined, 'user-2 sess-other must remain untouched');
+});
+
+test('J. REVIVAL PREVENTION: invalidated session cannot revive itself', async () => {
+  const baseTime = new Date('2026-09-05T12:00:00.000Z').getTime();
+  const { database, store } = createMockDatabase([
+    { table: sessionTable('user-1'), id: 'inval-target', record: { userId: 'user-1', createdAt: new Date(baseTime).toISOString(), lastActiveAt: new Date(baseTime).toISOString(), invalidatedAt: new Date(baseTime + 1000).toISOString() } }
+  ]);
+
+  const res = await evaluateSession(database, 'user-1', 'inval-target', { touchActivity: true }, baseTime + 5000);
+  assert.equal(res.ok, false);
+  if (!res.ok) {
+    assert.equal(res.status, 401);
+    assert.equal(res.code, 'session_expired');
+  }
+
+  const stored = store.get(sessionTable('user-1'))!.get('inval-target') as UserSession;
+  assert.ok(stored.invalidatedAt, 'session must remain invalidated');
+});
+
+test('K. IDLE TIMEOUT: >30m inactive returns 401 session_idle_timeout and marks invalidated', async () => {
   const nowTime = new Date('2026-09-05T12:00:00.000Z').getTime();
   const createdStr = new Date(nowTime - 40 * 60 * 1000).toISOString();
-  const lastActiveStr = new Date(nowTime - 31 * 60 * 1000).toISOString(); // 31 minutes ago (>30m)
+  const lastActiveStr = new Date(nowTime - 31 * 60 * 1000).toISOString();
 
   const { database, store } = createMockDatabase([{
     table: sessionTable('user-1'),
@@ -98,15 +347,15 @@ test('B. IDLE TIMEOUT: >30m inactive returns 401 session_idle_timeout and invali
     assert.equal(res.code, 'session_idle_timeout');
   }
 
-  const stored = store.get(sessionTable('user-1'))?.get('s-idle') as UserSession;
+  const stored = store.get(sessionTable('user-1'))!.get('s-idle') as UserSession;
   assert.ok(stored.invalidatedAt, 'session must be marked invalidated in database');
   assert.equal(stored.reason, 'idle_timeout');
 });
 
-test('C. ABSOLUTE TIMEOUT: >12h old returns 401 session_absolute_timeout even if recently active', async () => {
+test('L. ABSOLUTE TIMEOUT: >12h old returns 401 session_absolute_timeout even if recently active', async () => {
   const nowTime = new Date('2026-09-05T13:00:00.000Z').getTime();
-  const createdStr = new Date(nowTime - (12 * 60 * 60 * 1000 + 60000)).toISOString(); // 12h 1m ago
-  const recentActiveStr = new Date(nowTime - 2 * 60 * 1000).toISOString(); // active 2 min ago
+  const createdStr = new Date(nowTime - (12 * 60 * 60 * 1000 + 60000)).toISOString();
+  const recentActiveStr = new Date(nowTime - 2 * 60 * 1000).toISOString();
 
   const { database, store } = createMockDatabase([{
     table: sessionTable('user-1'),
@@ -121,156 +370,14 @@ test('C. ABSOLUTE TIMEOUT: >12h old returns 401 session_absolute_timeout even if
     assert.equal(res.code, 'session_absolute_timeout');
   }
 
-  const stored = store.get(sessionTable('user-1'))?.get('s-abs') as UserSession;
+  const stored = store.get(sessionTable('user-1'))!.get('s-abs') as UserSession;
   assert.ok(stored.invalidatedAt, 'session must be marked invalidated upon absolute timeout');
   assert.equal(stored.reason, 'absolute_timeout');
 });
 
-test('D. SIGN-OUT INVALIDATION: invalidate session and replay returns 401 session_expired', async () => {
-  const { database } = createMockDatabase();
-  const init = await initSession(database, 'user-1', '2026-09-05T12:00:00.000Z');
-  const sid = init.sessionId!;
-
-  // 1. Initial valid check
-  const now1 = new Date('2026-09-05T12:05:00.000Z').getTime();
-  const res1 = await evaluateSession(database, 'user-1', sid, {}, now1);
-  assert.equal(res1.ok, true);
-
-  // 2. Invalidate single session
-  await invalidateSession(database, 'user-1', sid, false, '2026-09-05T12:06:00.000Z');
-
-  // 3. Replay invalidated session
-  const res2 = await evaluateSession(database, 'user-1', sid, {}, new Date('2026-09-05T12:07:00.000Z').getTime());
-  assert.equal(res2.ok, false);
-  if (!res2.ok) {
-    assert.equal(res2.status, 401);
-    assert.equal(res2.code, 'session_expired');
-  }
-});
-
-test('E. MULTIPLE INDEPENDENT SESSIONS: activity in B does not refresh A, invalidating A does not invalidate B', async () => {
+test('M. SENSITIVE PRE-REQUEST ACTIVITY ORDERING: stale sensitive request cannot make itself recent', async () => {
   const baseTime = new Date('2026-09-05T12:00:00.000Z').getTime();
-  const initialA = new Date(baseTime).toISOString();
-  const initialB = new Date(baseTime).toISOString();
-
-  const { database, store } = createMockDatabase([
-    { table: sessionTable('user-1'), id: 'sess-A', record: { userId: 'user-1', createdAt: initialA, lastActiveAt: initialA } },
-    { table: sessionTable('user-1'), id: 'sess-B', record: { userId: 'user-1', createdAt: initialB, lastActiveAt: initialB } }
-  ]);
-
-  // Activity in B at +10 min
-  const timeB = baseTime + 10 * 60 * 1000;
-  const resB = await evaluateSession(database, 'user-1', 'sess-B', { touchActivity: true }, timeB);
-  assert.equal(resB.ok, true);
-
-  // Verify A's lastActiveAt was NOT refreshed
-  const storedA = store.get(sessionTable('user-1'))!.get('sess-A') as UserSession;
-  const storedB = store.get(sessionTable('user-1'))!.get('sess-B') as UserSession;
-  assert.equal(storedA.lastActiveAt, initialA, 'Session A lastActiveAt must remain unrefreshed');
-  assert.equal(storedB.lastActiveAt, new Date(timeB).toISOString(), 'Session B lastActiveAt must be updated');
-
-  // Invalidate A
-  await invalidateSession(database, 'user-1', 'sess-A', false, new Date(timeB + 1000).toISOString());
-
-  // A is expired, B is still valid
-  const resAAfter = await evaluateSession(database, 'user-1', 'sess-A', {}, timeB + 2000);
-  assert.equal(resAAfter.ok, false);
-  if (!resAAfter.ok) assert.equal(resAAfter.code, 'session_expired');
-
-  const resBAfter = await evaluateSession(database, 'user-1', 'sess-B', {}, timeB + 2000);
-  assert.equal(resBAfter.ok, true);
-});
-
-test('F. SIGN OUT EVERYWHERE: everywhere=true invalidates all sessions for authenticated user', async () => {
-  const baseTime = new Date('2026-09-05T12:00:00.000Z').getTime();
-  const { database, store } = createMockDatabase([
-    { table: sessionTable('user-1'), id: 'sess-1', record: { userId: 'user-1', createdAt: new Date(baseTime).toISOString(), lastActiveAt: new Date(baseTime).toISOString() } },
-    { table: sessionTable('user-1'), id: 'sess-2', record: { userId: 'user-1', createdAt: new Date(baseTime).toISOString(), lastActiveAt: new Date(baseTime).toISOString() } },
-    { table: sessionTable('user-2'), id: 'sess-other', record: { userId: 'user-2', createdAt: new Date(baseTime).toISOString(), lastActiveAt: new Date(baseTime).toISOString() } }
-  ]);
-
-  await invalidateSession(database, 'user-1', undefined, true, '2026-09-05T12:15:00.000Z');
-
-  const s1 = store.get(sessionTable('user-1'))!.get('sess-1') as UserSession;
-  const s2 = store.get(sessionTable('user-1'))!.get('sess-2') as UserSession;
-  const sOther = store.get(sessionTable('user-2'))!.get('sess-other') as UserSession;
-
-  assert.ok(s1.invalidatedAt, 'user-1 sess-1 must be invalidated');
-  assert.ok(s2.invalidatedAt, 'user-1 sess-2 must be invalidated');
-  assert.equal(sOther.invalidatedAt, undefined, 'user-2 sess-other must remain untouched');
-});
-
-test('G. HEARTBEAT: updates only target session, cannot revive invalidated/expired, tenant isolation enforced', async () => {
-  const baseTime = new Date('2026-09-05T12:00:00.000Z').getTime();
-  const { database } = createMockDatabase([
-    { table: sessionTable('user-1'), id: 'valid-1', record: { userId: 'user-1', createdAt: new Date(baseTime).toISOString(), lastActiveAt: new Date(baseTime).toISOString() } },
-    { table: sessionTable('user-1'), id: 'inval-1', record: { userId: 'user-1', createdAt: new Date(baseTime).toISOString(), lastActiveAt: new Date(baseTime).toISOString(), invalidatedAt: new Date(baseTime + 1000).toISOString() } },
-    { table: sessionTable('user-1'), id: 'expired-1', record: { userId: 'user-1', createdAt: new Date(baseTime).toISOString(), lastActiveAt: new Date(baseTime - 35 * 60 * 1000).toISOString() } },
-    { table: sessionTable('user-2'), id: 'tenant-2-sess', record: { userId: 'user-2', createdAt: new Date(baseTime).toISOString(), lastActiveAt: new Date(baseTime).toISOString() } }
-  ]);
-
-  // 1. Valid heartbeat succeeds and updates only target
-  const hbTime = baseTime + 60 * 1000;
-  const hbRes = await evaluateSession(database, 'user-1', 'valid-1', { touchActivity: true }, hbTime);
-  assert.equal(hbRes.ok, true);
-  if (hbRes.ok) assert.equal(hbRes.session.lastActiveAt, new Date(hbTime).toISOString());
-
-  // 2. Invalidated session cannot revive
-  const invalRes = await evaluateSession(database, 'user-1', 'inval-1', { touchActivity: true }, hbTime);
-  assert.equal(invalRes.ok, false);
-  if (!invalRes.ok) assert.equal(invalRes.code, 'session_expired');
-
-  // 3. Expired session cannot revive
-  const expRes = await evaluateSession(database, 'user-1', 'expired-1', { touchActivity: true }, hbTime);
-  assert.equal(expRes.ok, false);
-  if (!expRes.ok) assert.equal(expRes.code, 'session_idle_timeout');
-
-  // 4. Another tenant session cannot be accessed or touched
-  const tenantRes = await evaluateSession(database, 'user-1', 'tenant-2-sess', { touchActivity: true }, hbTime);
-  assert.equal(tenantRes.ok, false);
-  if (!tenantRes.ok) assert.equal(tenantRes.code, 'session_expired');
-});
-
-test('H. PASSIVE READ: passive requests do not update lastActiveAt', async () => {
-  const baseTime = new Date('2026-09-05T12:00:00.000Z').getTime();
-  const initialTime = new Date(baseTime).toISOString();
-  const { database, store } = createMockDatabase([
-    { table: sessionTable('user-1'), id: 'sess-read', record: { userId: 'user-1', createdAt: initialTime, lastActiveAt: initialTime } }
-  ]);
-
-  const readTime = baseTime + 5 * 60 * 1000;
-  const res = await evaluateSession(database, 'user-1', 'sess-read', { touchActivity: false }, readTime);
-  assert.equal(res.ok, true);
-
-  const stored = store.get(sessionTable('user-1'))!.get('sess-read') as UserSession;
-  assert.equal(stored.lastActiveAt, initialTime, 'lastActiveAt must NOT be updated on passive read');
-});
-
-test('I. SENSITIVE ACTION: requires recent activity within 15m; does not re-authenticate', async () => {
-  const baseTime = new Date('2026-09-05T12:00:00.000Z').getTime();
-  const { database } = createMockDatabase([
-    // Active 10 min ago (within 15m)
-    { table: sessionTable('user-1'), id: 'sess-recent', record: { userId: 'user-1', createdAt: new Date(baseTime - 10 * 60 * 1000).toISOString(), lastActiveAt: new Date(baseTime - 10 * 60 * 1000).toISOString() } },
-    // Active 16 min ago (>15m, but <30m idle timeout)
-    { table: sessionTable('user-1'), id: 'sess-stale', record: { userId: 'user-1', createdAt: new Date(baseTime - 20 * 60 * 1000).toISOString(), lastActiveAt: new Date(baseTime - 16 * 60 * 1000).toISOString() } }
-  ]);
-
-  // Recent activity passes sensitive check
-  const resRecent = await evaluateSession(database, 'user-1', 'sess-recent', { touchActivity: true, sensitive: true }, baseTime);
-  assert.equal(resRecent.ok, true);
-
-  // Stale activity fails with 403 recent_activity_required (not 401 reauthentication)
-  const resStale = await evaluateSession(database, 'user-1', 'sess-stale', { touchActivity: true, sensitive: true }, baseTime);
-  assert.equal(resStale.ok, false);
-  if (!resStale.ok) {
-    assert.equal(resStale.status, 403);
-    assert.equal(resStale.code, 'recent_activity_required');
-  }
-});
-
-test('SENSITIVE CHECK ORDER: stale sensitive request cannot make itself recent by touching activity', async () => {
-  const baseTime = new Date('2026-09-05T12:00:00.000Z').getTime();
-  const preRequestActive = new Date(baseTime - 16 * 60 * 1000).toISOString(); // 16 min ago
+  const preRequestActive = new Date(baseTime - 16 * 60 * 1000).toISOString(); // 16m ago (>15m, <30m)
 
   const { database, store } = createMockDatabase([
     { table: sessionTable('user-1'), id: 'sess-order', record: { userId: 'user-1', createdAt: new Date(baseTime - 25 * 60 * 1000).toISOString(), lastActiveAt: preRequestActive } }
@@ -297,7 +404,7 @@ test('SENSITIVE CHECK ORDER: stale sensitive request cannot make itself recent b
   }
 });
 
-test('SESSION ID TRANSPORT: URL query parameter session IDs are strictly rejected', () => {
+test('N. URL QUERY PARAMETER SESSION IDS REJECTED: header transport authoritative', () => {
   // 1. Query parameter ONLY -> must return undefined
   const reqWithQuery = { query: { sessionId: 'leak-in-url' } };
   assert.equal(getSessionId(reqWithQuery), undefined, 'URL query parameter sessionId must NOT be extracted');
@@ -315,7 +422,10 @@ test('SESSION ID TRANSPORT: URL query parameter session IDs are strictly rejecte
   };
   assert.equal(getSessionId(reqLowerHeader), 'lower-header-sid');
 
-  // 4. JSON Body (allowed for explicit invalidate / POST payloads)
-  const reqBody = { body: { sessionId: 'body-sid-456' } };
-  assert.equal(getSessionId(reqBody), 'body-sid-456');
+  // 4. JSON Body disallowed by default on normal protected routes
+  const reqBodyNormal = { body: { sessionId: 'body-sid-456' } };
+  assert.equal(getSessionId(reqBodyNormal), undefined, 'body.sessionId must be ignored on normal protected routes');
+
+  // 5. JSON Body allowed when explicitly permitted for lifecycle action (invalidate)
+  assert.equal(getSessionId(reqBodyNormal, { allowBody: true }), 'body-sid-456');
 });

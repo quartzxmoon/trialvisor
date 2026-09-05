@@ -175,12 +175,15 @@ export const handler=router({
   }],
  'POST /api/auth/session/heartbeat':[requireAuth(),enforceSession({touchActivity:true}),async c=>json({ok:true,lastActiveAt:new Date().toISOString()})],
  'POST /api/auth/session/invalidate':[requireAuth(),async c=>{
-    const u=c.user!.userId,now=new Date().toISOString();
-    const sid=getSessionId(c);
-    const b=(c.body||{}) as {everywhere?:boolean};
-    await invalidateSessionRecord(db,u,sid,b.everywhere,now);
-    return json({ok:true});
-  }],
+     const u=c.user!.userId,now=new Date().toISOString();
+     const sid=getSessionId(c,{allowBody:true});
+     const b=(c.body||{}) as {everywhere?:boolean};
+     const res=await invalidateSessionRecord(db,u,sid,b.everywhere===true,now);
+     if(!res.ok){
+       return error(res.error||'session_id_required',400);
+     }
+     return json({ok:true});
+   }],
  'GET /api/billing/status':[requireAuth(),enforceSession(),async c=>json(await billingSnapshot(c.user!.userId))],
  'POST /api/billing/checkout':[requireAuth(),enforceSession({touchActivity:true}),async c=>createCheckout(c.user!.userId,c.user!.email,(c.body as {cadence?:unknown}|undefined)?.cadence)],
  'POST /api/billing/portal':[requireAuth(),enforceSession({touchActivity:true}),async c=>createPortal(c.user!.userId)],
