@@ -27,12 +27,12 @@ This repository is a secret-free copy of the AppDeploy production source. AppDep
 
 ```sh
 npm install
-npm run typecheck
+npm run verify
 ```
 
 `@appdeploy/client` is injected by AppDeploy during its production build and is deliberately not installed from npm. The repository includes an ambient type declaration for local type validation; AppDeploy deployment QA is the authoritative bundle and runtime test.
 
-The production-facing QA scenarios are documented in `tests/tests.txt`. They are executed by AppDeploy after deployment and cover public trust surfaces, onboarding, explicit Protect authorization, persistent notifications and activity, customer data controls, Gmail discovery safety, and responsive provider-failure behavior.
+The production-facing QA scenarios are documented in `tests/tests.txt`. AppDeploy can use them for deployment QA, but a release must inspect the returned QA status because some deployments may return no automated E2E job. Executable provider parsing, confidence, and DKIM regression tests live under `tests/*.test.ts`; `npm run verify` runs them with all typechecks and the production build.
 
 ## Trust and customer controls
 

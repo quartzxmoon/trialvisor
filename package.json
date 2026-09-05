@@ -10,7 +10,8 @@
         "typecheck": "tsc --noEmit --noUnusedLocals false --noUnusedParameters false",
         "typecheck:billing": "tsc -p tsconfig.billing.json",
         "typecheck:backend": "tsc -p tsconfig.backend.json",
-        "verify": "npm run typecheck && npm run typecheck:billing && npm run typecheck:backend && npm run build"
+        "test": "node --experimental-strip-types --test tests/*.test.ts",
+        "verify": "npm run typecheck && npm run typecheck:billing && npm run typecheck:backend && npm test && npm run build"
     },
     "dependencies": {
         "lucide-react": "^0.469.0",
