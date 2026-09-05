@@ -19,6 +19,156 @@ export const canvaCancellationEvidence=(m:GmailMessage)=>{const value=messageTex
 
 export const extractProvider=(from:string)=>{const displayMatch=from.match(/^"?([^"<@]+)"?\s*</)?.[1]?.trim(),candidate=(displayMatch||'').replace(/\b(?:no[\s-]?reply|billing|support|team|notifications?|service|info)\b/gi,'').replace(/\s+/g,' ').trim();if(candidate&&candidate.length>1)return candidate.slice(0,80);const domainPart=(from.match(/@([^>\s]+)/)?.[1]||'').toLowerCase().replace(/[^a-z0-9.-].*$/,''),domainSegments=domainPart.split('.').filter(Boolean),label=domainSegments.length>=2?domainSegments[domainSegments.length-2]:domainSegments[0]||'',genericDomains=new Set(['gmail','googlemail','yahoo','hotmail','outlook','icloud','live','aol','proton','protonmail']);if(label&&!genericDomains.has(label))return (label.charAt(0).toUpperCase()+label.slice(1)).slice(0,80);const beforeAt=(from.split('@')[0]||'').replace(/[^a-zA-Z0-9\s]/g,' ').trim(),cleanedBefore=beforeAt.replace(/\b(?:no[\s-]?reply|billing|support|team)\b/gi,'').trim();if(cleanedBefore)return (cleanedBefore.charAt(0).toUpperCase()+cleanedBefore.slice(1)).slice(0,80);return 'Subscription'};
 
+const MONTH_MAP: Record<string, number> = {
+  jan: 1, january: 1,
+  feb: 2, february: 2,
+  mar: 3, march: 3,
+  apr: 4, april: 4,
+  may: 5,
+  jun: 6, june: 6,
+  jul: 7, july: 7,
+  aug: 8, august: 8,
+  sep: 9, september: 9,
+  oct: 10, october: 10,
+  nov: 11, november: 11,
+  dec: 12, december: 12,
+};
+
+export const formatCalendarDate = (
+  s?: string,
+  options?: Intl.DateTimeFormatOptions,
+  locale: string = 'en-US'
+): string => {
+  if (!s) return '';
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m) {
+    const [, y, mon, d] = m;
+    const local = new Date(Number(y), Number(mon) - 1, Number(d), 12, 0, 0);
+    return local.toLocaleDateString(locale, options || { month: 'short', day: 'numeric' });
+  }
+  return new Date(s).toLocaleDateString(locale, options || { month: 'short', day: 'numeric' });
+};
+
+export type ExtractedDateSignal = {
+  providerTrialEndDate?: string;
+  trialEnd: string;
+  safeDeadline: string;
+  plannedExecution: string;
+  hasExplicitTime: boolean;
+};
+
+export const extractDateSignal = (search: string, received: Date): ExtractedDateSignal => {
+  // 1. Check for ISO timestamp with explicit time: YYYY-MM-DDTHH:mm(:ss)?(Z|[+-]HH:mm)?
+  const isoMatch = search.match(/\b(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?(Z|[+-]\d{2}:?\d{2})?\b/i);
+  if (isoMatch) {
+    const isoDate = new Date(isoMatch[0]);
+    if (!isNaN(isoDate.getTime())) {
+      const trialEnd = isoDate.toISOString();
+      const deadline = new Date(isoDate.getTime() - 48 * 3600000).toISOString();
+      const planned = new Date(new Date(deadline).getTime() - 3600000).toISOString();
+      return {
+        providerTrialEndDate: isoMatch[1],
+        trialEnd,
+        safeDeadline: deadline,
+        plannedExecution: planned,
+        hasExplicitTime: true
+      };
+    }
+  }
+
+  // 2. Check for named month date with optional explicit time:
+  const namedMatch = search.match(/\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+(\d{1,2})(?:,\s*(\d{4}))?(?:\s+(?:at|@)\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(am|pm)?(?:\s+([A-Z]{3,4}|[+-]\d{2}:?\d{2}))?)?\b/i);
+  if (namedMatch) {
+    const mon = MONTH_MAP[namedMatch[1].toLowerCase()];
+    const day = parseInt(namedMatch[2], 10);
+    let year = namedMatch[3] ? parseInt(namedMatch[3], 10) : received.getUTCFullYear();
+    if (!namedMatch[3]) {
+      const candidate = new Date(Date.UTC(year, mon - 1, day));
+      if (candidate.getTime() < received.getTime() - 30 * 86400000) {
+        year += 1;
+      }
+    }
+    const dateStr = year + '-' + String(mon).padStart(2, '0') + '-' + String(day).padStart(2, '0');
+    if (namedMatch[4] && namedMatch[5]) {
+      let hours = parseInt(namedMatch[4], 10);
+      const mins = parseInt(namedMatch[5], 10);
+      const secs = namedMatch[6] ? parseInt(namedMatch[6], 10) : 0;
+      const ampm = namedMatch[7] ? namedMatch[7].toLowerCase() : null;
+      if (ampm === 'pm' && hours < 12) hours += 12;
+      if (ampm === 'am' && hours === 12) hours = 0;
+      const dt = new Date(Date.UTC(year, mon - 1, day, hours, mins, secs));
+      const trialEnd = dt.toISOString();
+      const deadline = new Date(dt.getTime() - 48 * 3600000).toISOString();
+      const planned = new Date(new Date(deadline).getTime() - 3600000).toISOString();
+      return {
+        providerTrialEndDate: dateStr,
+        trialEnd,
+        safeDeadline: deadline,
+        plannedExecution: planned,
+        hasExplicitTime: true
+      };
+    }
+    // Date-only: conservative internal cutoff at start of calendar day in UTC (00:00:00.000Z)
+    const cutoff = new Date(Date.UTC(year, mon - 1, day, 0, 0, 0));
+    const deadline = new Date(cutoff.getTime() - 48 * 3600000).toISOString();
+    const planned = new Date(new Date(deadline).getTime() - 3600000).toISOString();
+    return {
+      providerTrialEndDate: dateStr,
+      trialEnd: cutoff.toISOString(),
+      safeDeadline: deadline,
+      plannedExecution: planned,
+      hasExplicitTime: false
+    };
+  }
+
+  // 3. Check for numeric date YYYY-MM-DD
+  const isoDateOnly = search.match(/\b(\d{4})-(\d{2})-(\d{2})\b/);
+  if (isoDateOnly) {
+    const y = parseInt(isoDateOnly[1], 10), m = parseInt(isoDateOnly[2], 10), d = parseInt(isoDateOnly[3], 10);
+    const dateStr = y + '-' + String(m).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+    const cutoff = new Date(Date.UTC(y, m - 1, d, 0, 0, 0));
+    const deadline = new Date(cutoff.getTime() - 48 * 3600000).toISOString();
+    const planned = new Date(new Date(deadline).getTime() - 3600000).toISOString();
+    return {
+      providerTrialEndDate: dateStr,
+      trialEnd: cutoff.toISOString(),
+      safeDeadline: deadline,
+      plannedExecution: planned,
+      hasExplicitTime: false
+    };
+  }
+
+  // 4. Check for slash date MM/DD/YYYY
+  const slashDate = search.match(/\b(\d{1,2})\/(\d{1,2})\/(\d{2,4})\b/);
+  if (slashDate) {
+    let m = parseInt(slashDate[1], 10), d = parseInt(slashDate[2], 10), y = parseInt(slashDate[3], 10);
+    if (y < 100) y += 2000;
+    const dateStr = y + '-' + String(m).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+    const cutoff = new Date(Date.UTC(y, m - 1, d, 0, 0, 0));
+    const deadline = new Date(cutoff.getTime() - 48 * 3600000).toISOString();
+    const planned = new Date(new Date(deadline).getTime() - 3600000).toISOString();
+    return {
+      providerTrialEndDate: dateStr,
+      trialEnd: cutoff.toISOString(),
+      safeDeadline: deadline,
+      plannedExecution: planned,
+      hasExplicitTime: false
+    };
+  }
+
+  // 5. Default fallback when no date found: 7 days after received
+  const fallback = new Date(received.getTime() + 7 * 86400000);
+  const deadline = new Date(fallback.getTime() - 48 * 3600000).toISOString();
+  const planned = new Date(new Date(deadline).getTime() - 3600000).toISOString();
+  return {
+    providerTrialEndDate: undefined,
+    trialEnd: fallback.toISOString(),
+    safeDeadline: deadline,
+    plannedExecution: planned,
+    hasExplicitTime: false
+  };
+};
+
 export const classifySignal=(m:GmailMessage)=>{
  const value=messageText(m),search=(value.subject+' '+value.text).replace(/\s+/g,' ');
  const trial=/\b(free\s+trial|trial\s+(?:has\s+)?started|trial\s+(?:ends?|expires?|ending)|trial\s+period|after\s+(?:the|your)\s+trial)\b/i.test(search);
@@ -29,9 +179,28 @@ export const classifySignal=(m:GmailMessage)=>{
  const date=namedDate||numericDate,score=(trial?2:0)+(billing?1:0)+(price?1:0)+(date?1:0);
  if(score<1)return null;
  const confidence=score>=4?.94:score>=2?.74:.44,band:'HIGH'|'MEDIUM'|'LOW'=score>=4?'HIGH':score>=2?'MEDIUM':'LOW';
- const received=m.internalDate?new Date(Number(m.internalDate)):new Date();let parsed:Date|null=null;
- if(date){const raw=date[0],hasYear=/\b\d{4}\b/.test(raw);parsed=new Date(hasYear?raw:raw+', '+received.getUTCFullYear());if(!hasYear&&parsed.getTime()<received.getTime()-30*86400000)parsed=new Date(raw+', '+(received.getUTCFullYear()+1));if(Number.isNaN(parsed.getTime()))parsed=null}
- const end=parsed||new Date(received.getTime()+7*86400000),deadline=new Date(end.getTime()-48*3600000);
+ const received=m.internalDate?new Date(Number(m.internalDate)):new Date();
+ const dateSignal=extractDateSignal(search,received);
  const provider=extractProvider(value.from);
- return{provider,plan:value.subject.slice(0,120)||'Detected subscription',price:price?Number(price[1].replace(',','.')):0,currency:'USD',trialEnd:end.toISOString(),safeDeadline:deadline.toISOString(),plannedExecution:new Date(deadline.getTime()-3600000).toISOString(),state:'REVIEW_REQUIRED' as const,...providerSupport(provider),confidence,confidenceBand:band,sourceRef:{provider:'google' as const,messageId:m.id,threadId:m.threadId,receivedAt:m.internalDate?new Date(Number(m.internalDate)).toISOString():undefined}};
+ return{
+   provider,
+   plan:value.subject.slice(0,120)||'Detected subscription',
+   price:price?Number(price[1].replace(',','.')):0,
+   currency:'USD',
+   trialEnd:dateSignal.trialEnd,
+   safeDeadline:dateSignal.safeDeadline,
+   plannedExecution:dateSignal.plannedExecution,
+   providerTrialEndDate:dateSignal.providerTrialEndDate,
+   hasExplicitTime:dateSignal.hasExplicitTime,
+   state:'REVIEW_REQUIRED' as const,
+   ...providerSupport(provider),
+   confidence,
+   confidenceBand:band,
+   sourceRef:{
+     provider:'google' as const,
+     messageId:m.id,
+     threadId:m.threadId,
+     receivedAt:m.internalDate?new Date(Number(m.internalDate)).toISOString():undefined
+   }
+ };
 };
