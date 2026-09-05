@@ -1,4 +1,4 @@
-import { router, json, error, requireAuth, db, notifications, secrets } from '@appdeploy/sdk';
+import { router, json, error, requireAuth, db, notifications, secrets, type RouterContext } from '@appdeploy/sdk';
 import { ACTIVE_STATUSES, billingConfigured, billingSnapshot, createCheckout, createPortal, currentBilling, handleStripeWebhook, hasProEntitlement } from './billing';
 type State='REVIEW_REQUIRED'|'AUTO_CANCEL_ENABLED'|'DECISION_PENDING'|'KEEP_REQUESTED'|'CANCELLATION_RUNNING'|'CANCELLATION_NEEDS_USER'|'CANCELED_CONFIRMED';
 type ProviderSupport='GUIDED'|'NOT_SUPPORTED';
@@ -172,16 +172,50 @@ const addNotice=async(userId:string,notice:Omit<PersistentNotice,'userId'|'at'|'
 const SESSION_IDLE_TIMEOUT_MS=30*60*1000;
 const SESSION_ABSOLUTE_LIFETIME_MS=12*60*60*1000;
 const SENSITIVE_ACTION_MAX_AGE_MS=15*60*1000;
-type UserSession={id?:string;userId:string;createdAt:string;lastActiveAt:string;invalidatedAt?:string;reason?:'user_signout'|'idle_timeout'|'absolute_timeout'|'superseded'|'reauthentication_required'};
-const getLatestSession=async(u:string):Promise<(UserSession&{id:string})|null>=>{
-  const sessions=(await db.list<UserSession>(table(u,'sessions'),{limit:20})).items;
-  return sessions.sort((a,b)=>b.createdAt.localeCompare(a.createdAt))[0]||null;
+type UserSession={id?:string;userId:string;createdAt:string;lastActiveAt:string;invalidatedAt?:string;reason?:'user_signout'|'idle_timeout'|'absolute_timeout'|'superseded'|'recent_activity_required'};
+const getSessionId=(c:RouterContext):string|undefined=>{
+  const qSid=c.query?.sessionId;
+  if(typeof qSid==='string'&&qSid.trim())return qSid.trim();
+  const bSid=(c.body as {sessionId?:string}|undefined)?.sessionId;
+  if(typeof bSid==='string'&&bSid.trim())return bSid.trim();
+  const rawHeaders=(c.event as {headers?:Record<string,string>}|undefined)?.headers;
+  if(rawHeaders){
+    const hSid=rawHeaders['x-session-id']||rawHeaders['X-Session-Id'];
+    if(typeof hSid==='string'&&hSid.trim())return hSid.trim();
+  }
+  return undefined;
+};
+const resolveSession=async(u:string,sessionId?:string):Promise<(UserSession&{id:string})|null>=>{
+  if(sessionId){
+    const [s]=await db.get<UserSession>(table(u,'sessions'),[sessionId]);
+    if(s&&s.userId===u)return {...s,id:sessionId};
+    return null;
+  }
+  const active=(await db.list<UserSession>(table(u,'sessions'),{limit:20})).items.filter(s=>!s.invalidatedAt);
+  if(active.length===1)return active[0];
+  return null;
+};
+const cleanupSessions=async(u:string)=>{
+  const records=(await db.list<UserSession>(table(u,'sessions'),{limit:50})).items;
+  const now=Date.now(),toDelete:string[]=[];
+  for(const r of records){
+    const created=new Date(r.createdAt).getTime();
+    const isPastAbsolute=!isNaN(created)&&now-created>SESSION_ABSOLUTE_LIFETIME_MS;
+    if(r.invalidatedAt){
+      const inval=new Date(r.invalidatedAt).getTime();
+      if(!isNaN(inval)&&now-inval>3600000)toDelete.push(r.id);
+    }else if(isPastAbsolute){
+      toDelete.push(r.id);
+    }
+  }
+  if(toDelete.length)await db.delete(table(u,'sessions'),toDelete);
 };
 const enforceSession=(opts:{touchActivity?:boolean;sensitive?:boolean}={})=>{
-  return async(c:{user?:{userId:string}})=>{
+  return async(c:RouterContext)=>{
     if(!c.user?.userId)return error('Unauthorized',401);
     const u=c.user.userId;
-    const session=await getLatestSession(u);
+    const sid=getSessionId(c);
+    const session=await resolveSession(u,sid);
     const now=Date.now();
     if(!session||session.invalidatedAt){
       return error('session_expired',401);
@@ -198,7 +232,7 @@ const enforceSession=(opts:{touchActivity?:boolean;sensitive?:boolean}={})=>{
     }
     if(opts.sensitive){
       if(now-lastActiveTime>SENSITIVE_ACTION_MAX_AGE_MS||now-createdTime>SENSITIVE_ACTION_MAX_AGE_MS){
-        return error('recent_authentication_required',403);
+        return error('recent_activity_required',403);
       }
     }
     if(opts.touchActivity){
@@ -237,16 +271,22 @@ export const handler=router({
  'POST /api/billing/webhook':[async c=>handleStripeWebhook(c.event)],
  'POST /api/auth/session/init':[requireAuth(),async c=>{
    const u=c.user!.userId,now=new Date().toISOString();
-   const prior=(await db.list<UserSession>(table(u,'sessions'),{limit:20})).items.filter(s=>!s.invalidatedAt);
-   if(prior.length)await db.update(table(u,'sessions'),prior.map(s=>({id:s.id,record:{...s,invalidatedAt:now,reason:'superseded'}})));
+   await cleanupSessions(u);
    const [id]=await db.add(table(u,'sessions'),[{userId:u,createdAt:now,lastActiveAt:now}]);
    return json({ok:true,sessionId:id,createdAt:now,lastActiveAt:now,idleTimeoutMs:SESSION_IDLE_TIMEOUT_MS,absoluteLifetimeMs:SESSION_ABSOLUTE_LIFETIME_MS});
  }],
  'POST /api/auth/session/heartbeat':[requireAuth(),enforceSession({touchActivity:true}),async c=>json({ok:true,lastActiveAt:new Date().toISOString()})],
  'POST /api/auth/session/invalidate':[requireAuth(),async c=>{
    const u=c.user!.userId,now=new Date().toISOString();
-   const active=(await db.list<UserSession>(table(u,'sessions'),{limit:20})).items.filter(s=>!s.invalidatedAt);
-   if(active.length)await db.update(table(u,'sessions'),active.map(s=>({id:s.id,record:{...s,invalidatedAt:now,reason:'user_signout'}})));
+   const sid=getSessionId(c);
+   const b=(c.body||{}) as {everywhere?:boolean};
+   if(b.everywhere||!sid){
+     const active=(await db.list<UserSession>(table(u,'sessions'),{limit:20})).items.filter(s=>!s.invalidatedAt);
+     if(active.length)await db.update(table(u,'sessions'),active.map(s=>({id:s.id,record:{...s,invalidatedAt:now,reason:'user_signout'}})));
+   }else{
+     const [target]=await db.get<UserSession>(table(u,'sessions'),[sid]);
+     if(target&&target.userId===u)await db.update(table(u,'sessions'),[{id:sid,record:{...target,invalidatedAt:now,reason:'user_signout'}}]);
+   }
    return json({ok:true});
  }],
  'GET /api/billing/status':[requireAuth(),enforceSession(),async c=>json(await billingSnapshot(c.user!.userId))],

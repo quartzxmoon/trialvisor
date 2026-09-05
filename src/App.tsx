@@ -19,6 +19,8 @@ const guidanceCopy:Record<string,string>={FIRST_AUTHENTICATED_VISIT:'Welcome to 
 const SESSION_IDLE_TIMEOUT_MS=30*60*1000;
 const SESSION_WARN_TIMEOUT_MS=25*60*1000;
 const HEARTBEAT_THROTTLE_MS=60*1000;
+const getStoredSessionId=()=>{try{return localStorage.getItem('trialvisor_session_id')||undefined}catch{return undefined}};
+const setStoredSessionId=(sid?:string)=>{try{if(sid)localStorage.setItem('trialvisor_session_id',sid);else localStorage.removeItem('trialvisor_session_id')}catch{}};
 function App(){
  const [snap,setSnap]=useState<Snapshot|null>(null),[busy,setBusy]=useState(''),[error,setError]=useState(''),[view,setView]=useState<'overview'|'protection'|'accounts'|'activity'|'notifications'|'settings'|'billing'>('overview'),[modal,setModal]=useState<Modal>(null),[toast,setToast]=useState<Toast>(null),[mobileNav,setMobileNav]=useState(false);
  const lastActivityRef=useRef<number>(Date.now());
@@ -26,7 +28,10 @@ function App(){
  const handleSignOut=async(notice?:string)=>{
   try{
    setBusy('signout');
-   try{await api.post('/api/auth/session/invalidate')}catch{}
+   const sid=getStoredSessionId();
+   setStoredSessionId(undefined);
+   const url='/api/auth/session/invalidate'+(sid?`?sessionId=${encodeURIComponent(sid)}`:'');
+   try{await api.post(url,{sessionId:sid})}catch{}
    await auth.signOut();
   }catch{}
   setSnap(null);
@@ -39,7 +44,9 @@ function App(){
   lastHeartbeatRef.current=Date.now();
   setModal(null);
   try{
-   await api.post('/api/auth/session/heartbeat');
+   const sid=getStoredSessionId();
+   const url='/api/auth/session/heartbeat'+(sid?`?sessionId=${encodeURIComponent(sid)}`:'');
+   await api.post(url,{sessionId:sid});
   }catch(e){
    const status=(e as {response?:{status?:number}})?.response?.status;
    if(status===401){
@@ -50,7 +57,9 @@ function App(){
  const load=async()=>{
   try{
    setError('');
-   const request=()=>Promise.race([api.get('/api/dashboard'),new Promise<never>((_,reject)=>setTimeout(()=>reject(new Error('dashboard_timeout')),15000))]);
+   const sid=getStoredSessionId();
+   const url='/api/dashboard'+(sid?`?sessionId=${encodeURIComponent(sid)}`:'');
+   const request=()=>Promise.race([api.get(url),new Promise<never>((_,reject)=>setTimeout(()=>reject(new Error('dashboard_timeout')),15000))]);
    let result;
    try{
     result=await request();
@@ -80,7 +89,9 @@ function App(){
    lastActivityRef.current=Date.now();
    if(Date.now()-lastHeartbeatRef.current>HEARTBEAT_THROTTLE_MS){
     lastHeartbeatRef.current=Date.now();
-    api.post('/api/auth/session/heartbeat').catch((e:{response?:{status?:number}})=>{
+    const sid=getStoredSessionId();
+    const url='/api/auth/session/heartbeat'+(sid?`?sessionId=${encodeURIComponent(sid)}`:'');
+    api.post(url,{sessionId:sid}).catch((e:{response?:{status?:number}})=>{
      if(e?.response?.status===401){
       void handleSignOut('Your session expired for security. Sign in again to continue.');
      }
@@ -102,6 +113,17 @@ function App(){
    clearInterval(timer);
   };
  },[snap]);
+ useEffect(()=>{
+  const onStorage=(e:StorageEvent)=>{
+   if(e.key==='trialvisor_session_id'&&!e.newValue&&snap){
+    setSnap(null);
+    setModal(null);
+    setError('Your session expired for security. Sign in again to continue.');
+   }
+  };
+  window.addEventListener('storage',onStorage);
+  return()=>window.removeEventListener('storage',onStorage);
+ },[snap]);
  useEffect(()=>{const params=new URLSearchParams(window.location.search),billing=params.get('billing'),oauth=params.get('oauth');if(billing==='success')setToast({key:'BILLING_RESULT',text:'Checkout returned successfully. Paid access activates only after Trialvisor verifies Stripe’s signed webhook.'});else if(billing==='cancelled')setToast({key:'BILLING_RESULT',text:'Checkout was cancelled. Your current plan was not changed.'});if(oauth==='google_connected')setToast({key:'OAUTH_RESULT',text:'Google account connected successfully. You can now sync Gmail to discover subscription signals.'});else if(oauth==='google_denied')setError('Google sign-in was canceled or access was denied. No account was connected.');else if(oauth==='google_failed')setError('Google account connection could not be completed safely. Please try connecting again.');if(billing||oauth)window.history.replaceState({},'',window.location.pathname)},[]);
  useEffect(()=>{if(!snap||toast)return;const shown=snap.account.guidanceShown||[];const google=snap.connections.some(x=>x.provider==='Google'&&x.mode==='PRODUCTION');const canceled=snap.trials.some(x=>x.state==='CANCELED_CONFIRMED');const candidates=[!shown.includes('FIRST_AUTHENTICATED_VISIT')&&'FIRST_AUTHENTICATED_VISIT',google&&!shown.includes('FIRST_ACCOUNT_CONNECTED')&&'FIRST_ACCOUNT_CONNECTED',snap.trials.length>0&&!shown.includes('FIRST_TRIAL_DETECTED')&&'FIRST_TRIAL_DETECTED',canceled&&!shown.includes('FIRST_VERIFIED_CANCELLATION')&&'FIRST_VERIFIED_CANCELLATION'].filter(Boolean) as string[];if(candidates[0])showGuidance(candidates[0],guidanceCopy[candidates[0]])},[snap,toast]);
  const markGuidance=async(key:string)=>{try{await api.post('/api/guidance/'+key+'/seen');setSnap(s=>s?{...s,account:{...s.account,guidanceShown:Array.from(new Set([...(s.account.guidanceShown||[]),key]))}}:s)}catch{}};
@@ -111,7 +133,10 @@ function App(){
    setBusy('signin');
    setError('');
    await auth.signIn();
-   try{await api.post('/api/auth/session/init')}catch{}
+   try{
+    const r=await api.post('/api/auth/session/init');
+    if(r?.data?.sessionId)setStoredSessionId(r.data.sessionId);
+   }catch{}
    lastActivityRef.current=Date.now();
    lastHeartbeatRef.current=Date.now();
    await load();
@@ -125,7 +150,9 @@ function App(){
  const resetSignIn=async()=>{
   try{
    setBusy('reset');
-   try{await api.post('/api/auth/session/invalidate')}catch{}
+   const sid=getStoredSessionId();
+   setStoredSessionId(undefined);
+   try{await api.post('/api/auth/session/invalidate'+(sid?`?sessionId=${encodeURIComponent(sid)}`:''),{sessionId:sid})}catch{}
    await auth.signOut();
    setSnap(null);
    setError('Sign-in session reset. Select Create secure account to try again.');
@@ -137,7 +164,11 @@ function App(){
   try{
    setBusy(path);
    setError('');
-   const request=()=>api.post(path,body);
+   const sid=getStoredSessionId();
+   const sep=path.includes('?')?'&':'?';
+   const url=sid?`${path}${sep}sessionId=${encodeURIComponent(sid)}`:path;
+   const payload=sid?{...body,sessionId:sid}:body;
+   const request=()=>api.post(url,payload);
    let r;
    try{
     r=await request();
@@ -160,8 +191,8 @@ function App(){
     await handleSignOut('Your session expired for security. Sign in again to continue.');
     return null;
    }
-   if(status===403&&code==='recent_authentication_required'){
-    setError('For your security, recent authentication is required before this action. Sign in again to continue.');
+   if(status===403&&(code==='recent_activity_required'||code==='recent_authentication_required')){
+    setError('For your security, recent session activity is required before this sensitive action. Please sign out and sign in again to proceed.');
     return null;
    }
    const safeMessage=typeof message==='string'&&!message.includes('Internal')&&!message.includes('stack')&&message.length<=200?message:null;
@@ -191,12 +222,14 @@ function App(){
  const cancel=async(t:Trial)=>{if(t.state==='CANCELLATION_NEEDS_USER'){const r=await post('/api/trials/'+t.id+'/provider-step-complete');if(r){setModal(null);if(/\bcanva\b/i.test(t.provider))await syncGoogle()}return}await post('/api/trials/'+t.id+'/cancel-selected');setModal(null)};
  const readNotice=async(id:string)=>{await post('/api/notifications/'+id+'/read')};
  const readAllNotices=async()=>{await post('/api/notifications/read-all')};
- const exportData=async()=>{try{setBusy('export');const r=await api.get('/api/account/export'),blob=new Blob([JSON.stringify(r.data,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='trialvisor-data-export.json';a.click();URL.revokeObjectURL(url)}catch{setError('Your data export could not be prepared. Nothing was changed.')}finally{setBusy('')}};
+ const exportData=async()=>{try{setBusy('export');const sid=getStoredSessionId();const r=await api.get('/api/account/export'+(sid?`?sessionId=${encodeURIComponent(sid)}`:'')),blob=new Blob([JSON.stringify(r.data,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='trialvisor-data-export.json';a.click();URL.revokeObjectURL(url)}catch{setError('Your data export could not be prepared. Nothing was changed.')}finally{setBusy('')}};
  const deleteAccount=async()=>{
   try{
-   setBusy('delete-account');
-   await api.post('/api/account/delete',{confirm:'DELETE'});
-   try{await api.post('/api/auth/session/invalidate')}catch{}
+    setBusy('delete-account');
+    const sid=getStoredSessionId();
+    await api.post('/api/account/delete'+(sid?`?sessionId=${encodeURIComponent(sid)}`:''),sid?{confirm:'DELETE',sessionId:sid}:{confirm:'DELETE'});
+    setStoredSessionId(undefined);
+    try{await api.post('/api/auth/session/invalidate'+(sid?`?sessionId=${encodeURIComponent(sid)}`:''),{sessionId:sid})}catch{}
    await auth.signOut();
    setSnap(null);
    window.location.assign('./');
@@ -207,8 +240,8 @@ function App(){
     await handleSignOut('Your session expired for security. Sign in again to continue.');
     return;
    }
-   if(status===403&&code==='recent_authentication_required'){
-    setError('For your security, recent authentication is required before deleting your account. Sign in again to continue.');
+   if(status===403&&(code==='recent_activity_required'||code==='recent_authentication_required')){
+    setError('For your security, recent session activity is required before deleting your account. Please sign out and sign in again to proceed.');
     return;
    }
    const message=(e as {response?:{data?:{error?:string;message?:string}}})?.response?.data?.error||(e as {response?:{data?:{message?:string}}})?.response?.data?.message;
