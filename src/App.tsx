@@ -30,8 +30,7 @@ function App(){
    setBusy('signout');
    const sid=getStoredSessionId();
    setStoredSessionId(undefined);
-   const url='/api/auth/session/invalidate'+(sid?`?sessionId=${encodeURIComponent(sid)}`:'');
-   try{await api.post(url,{sessionId:sid})}catch{}
+   try{await api.post('/api/auth/session/invalidate',{sessionId:sid},sid?{headers:{'X-Session-Id':sid}}:undefined)}catch{}
    await auth.signOut();
   }catch{}
   setSnap(null);
@@ -45,8 +44,7 @@ function App(){
   setModal(null);
   try{
    const sid=getStoredSessionId();
-   const url='/api/auth/session/heartbeat'+(sid?`?sessionId=${encodeURIComponent(sid)}`:'');
-   await api.post(url,{sessionId:sid});
+   await api.post('/api/auth/session/heartbeat',{sessionId:sid},sid?{headers:{'X-Session-Id':sid}}:undefined);
   }catch(e){
    const status=(e as {response?:{status?:number}})?.response?.status;
    if(status===401){
@@ -58,8 +56,7 @@ function App(){
   try{
    setError('');
    const sid=getStoredSessionId();
-   const url='/api/dashboard'+(sid?`?sessionId=${encodeURIComponent(sid)}`:'');
-   const request=()=>Promise.race([api.get(url),new Promise<never>((_,reject)=>setTimeout(()=>reject(new Error('dashboard_timeout')),15000))]);
+   const request=()=>Promise.race([api.get('/api/dashboard',sid?{headers:{'X-Session-Id':sid}}:undefined),new Promise<never>((_,reject)=>setTimeout(()=>reject(new Error('dashboard_timeout')),15000))]);
    let result;
    try{
     result=await request();
@@ -90,8 +87,7 @@ function App(){
    if(Date.now()-lastHeartbeatRef.current>HEARTBEAT_THROTTLE_MS){
     lastHeartbeatRef.current=Date.now();
     const sid=getStoredSessionId();
-    const url='/api/auth/session/heartbeat'+(sid?`?sessionId=${encodeURIComponent(sid)}`:'');
-    api.post(url,{sessionId:sid}).catch((e:{response?:{status?:number}})=>{
+    api.post('/api/auth/session/heartbeat',{sessionId:sid},sid?{headers:{'X-Session-Id':sid}}:undefined).catch((e:{response?:{status?:number}})=>{
      if(e?.response?.status===401){
       void handleSignOut('Your session expired for security. Sign in again to continue.');
      }
@@ -152,7 +148,7 @@ function App(){
    setBusy('reset');
    const sid=getStoredSessionId();
    setStoredSessionId(undefined);
-   try{await api.post('/api/auth/session/invalidate'+(sid?`?sessionId=${encodeURIComponent(sid)}`:''),{sessionId:sid})}catch{}
+   try{await api.post('/api/auth/session/invalidate',{sessionId:sid},sid?{headers:{'X-Session-Id':sid}}:undefined)}catch{}
    await auth.signOut();
    setSnap(null);
    setError('Sign-in session reset. Select Create secure account to try again.');
@@ -165,10 +161,8 @@ function App(){
    setBusy(path);
    setError('');
    const sid=getStoredSessionId();
-   const sep=path.includes('?')?'&':'?';
-   const url=sid?`${path}${sep}sessionId=${encodeURIComponent(sid)}`:path;
    const payload=sid?{...body,sessionId:sid}:body;
-   const request=()=>api.post(url,payload);
+   const request=()=>api.post(path,payload,sid?{headers:{'X-Session-Id':sid}}:undefined);
    let r;
    try{
     r=await request();
@@ -222,14 +216,14 @@ function App(){
  const cancel=async(t:Trial)=>{if(t.state==='CANCELLATION_NEEDS_USER'){const r=await post('/api/trials/'+t.id+'/provider-step-complete');if(r){setModal(null);if(/\bcanva\b/i.test(t.provider))await syncGoogle()}return}await post('/api/trials/'+t.id+'/cancel-selected');setModal(null)};
  const readNotice=async(id:string)=>{await post('/api/notifications/'+id+'/read')};
  const readAllNotices=async()=>{await post('/api/notifications/read-all')};
- const exportData=async()=>{try{setBusy('export');const sid=getStoredSessionId();const r=await api.get('/api/account/export'+(sid?`?sessionId=${encodeURIComponent(sid)}`:'')),blob=new Blob([JSON.stringify(r.data,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='trialvisor-data-export.json';a.click();URL.revokeObjectURL(url)}catch{setError('Your data export could not be prepared. Nothing was changed.')}finally{setBusy('')}};
+ const exportData=async()=>{try{setBusy('export');const sid=getStoredSessionId();const r=await api.get('/api/account/export',sid?{headers:{'X-Session-Id':sid}}:undefined),blob=new Blob([JSON.stringify(r.data,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='trialvisor-data-export.json';a.click();URL.revokeObjectURL(url)}catch{setError('Your data export could not be prepared. Nothing was changed.')}finally{setBusy('')}};
  const deleteAccount=async()=>{
   try{
     setBusy('delete-account');
     const sid=getStoredSessionId();
-    await api.post('/api/account/delete'+(sid?`?sessionId=${encodeURIComponent(sid)}`:''),sid?{confirm:'DELETE',sessionId:sid}:{confirm:'DELETE'});
+    await api.post('/api/account/delete',sid?{confirm:'DELETE',sessionId:sid}:{confirm:'DELETE'},sid?{headers:{'X-Session-Id':sid}}:undefined);
     setStoredSessionId(undefined);
-    try{await api.post('/api/auth/session/invalidate'+(sid?`?sessionId=${encodeURIComponent(sid)}`:''),{sessionId:sid})}catch{}
+    try{await api.post('/api/auth/session/invalidate',{sessionId:sid},sid?{headers:{'X-Session-Id':sid}}:undefined)}catch{}
    await auth.signOut();
    setSnap(null);
    window.location.assign('./');

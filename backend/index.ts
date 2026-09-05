@@ -2,6 +2,7 @@ import { router, json, error, requireAuth, db, notifications, secrets, type Rout
 import { ACTIVE_STATUSES, billingConfigured, billingSnapshot, createCheckout, createPortal, currentBilling, handleStripeWebhook, hasProEntitlement } from './billing';
 import { canvaCancellationEvidence, classifySignal, providerSupport, type GmailMessage, type ProviderSupport } from './provider-signals';
 import { deleteAllRecords as deleteAllPagedRecords, listAllMatching } from './paged-records';
+import { SESSION_IDLE_TIMEOUT_MS, SESSION_ABSOLUTE_LIFETIME_MS, SENSITIVE_ACTION_MAX_AGE_MS, getSessionId, resolveSession as resolveSessionRecord, cleanupSessions as cleanupSessionsRecords, evaluateSession, invalidateSession as invalidateSessionRecord, type UserSession } from './session';
 type State='REVIEW_REQUIRED'|'AUTO_CANCEL_ENABLED'|'DECISION_PENDING'|'KEEP_REQUESTED'|'CANCELLATION_RUNNING'|'CANCELLATION_NEEDS_USER'|'CANCELED_CONFIRMED';
 type Trial={userId:string;provider:string;plan:string;price:number;currency:string;trialEnd:string;safeDeadline:string;plannedExecution:string;state:State;tier:string;support?:ProviderSupport;confidence:number;confidenceBand?:'HIGH'|'MEDIUM'|'LOW';sourceRef?:{provider:'google'|'microsoft';messageId:string;threadId:string;receivedAt?:string};verificationRef?:{provider:'google';messageId:string;threadId:string;receivedAt?:string};evidence?:string;nextAction?:string;authorizationAt?:string;providerActionAt?:string;cancellationUrl?:string};
 type Job={userId:string;trialId:string;kind:'DECISION'|'CANCEL';dueAt:string;status:'PENDING'|'REVOKED'|'DONE';attempts:number;idempotencyKey:string};
@@ -153,75 +154,13 @@ const findTrial=async(u:string,id:string)=>{const [t]=await db.get<Trial>(table(
 const replace=async(u:string,id:string,t:Trial)=>{const [ok]=await db.update(table(u,'trials'),[{id,record:t}]);if(!ok)throw new Error('update failed')};
 const execute=async(userId:string,id:string)=>{const t=await findTrial(userId,id);if(!t||!['AUTO_CANCEL_ENABLED','DECISION_PENDING'].includes(t.state))return {ok:false,reason:'not_authorized'};await replace(userId,id,{...t,state:'CANCELLATION_RUNNING'});await audit(userId,id,'CANCELLATION_STARTED','Explicit authorization revalidated; no provider action was represented as complete.');const support=t.support||providerSupport(t.provider).support,guided=support==='GUIDED',next={...t,...providerSupport(t.provider),state:'CANCELLATION_NEEDS_USER' as State,nextAction:guided?'Open Canva’s official cancellation guide, complete the cancellation in the correct purchase channel, then return here. Trialvisor will require authenticated provider evidence before marking it verified.':'No reliable Trialvisor cancellation workflow currently exists for this provider. Cancel directly with the provider and retain its confirmation; Trialvisor will not claim a verified outcome.'};await replace(userId,id,next);await audit(userId,id,guided?'ASSIST_REQUIRED':'PROVIDER_ADAPTER_UNAVAILABLE',guided?'Guided Canva workflow requires the customer to act; provider evidence is required for verification.':'No reliable production cancellation workflow is enabled for this provider.');await addNotice(userId,{kind:'action_required',title:'Action required for '+t.provider,message:next.nextAction||'User participation is required before cancellation can continue.',severity:'critical',trialId:id,provider:t.provider,actionView:'overview'});await notifications.send({userIds:[userId],notification:{title:'Action required',body:guided?'Complete Canva cancellation using its official flow, then sync Gmail for provider evidence.':t.provider+' has no reliable Trialvisor cancellation workflow yet.'},data:{trialId:id,kind:'guided'}});return{ok:true,state:next.state}};
 export const durableActionsWorker=async()=>{const now=new Date().toISOString();const pendingJobs=await listAllJobs(x=>x.status==='PENDING'&&x.dueAt<=now,20);for(const j of pendingJobs){try{if(j.kind==='DECISION'){const t=await findTrial(j.userId,j.trialId);if(t&&t.state==='AUTO_CANCEL_ENABLED'){await replace(j.userId,j.trialId,{...t,state:'DECISION_PENDING'});await addNotice(j.userId,{kind:'decision_needed',title:'Keep or Cancel decision needed',message:t.provider+' is approaching its billing date. Choose Keep Service or leave the authorized cancellation scheduled.',severity:'warning',trialId:j.trialId,provider:t.provider,actionView:'overview'});await notifications.send({userIds:[j.userId],notification:{title:t.provider+' trial is ending',body:'Keep it or Trialvisor will cancel as previously authorized.'},data:{trialId:j.trialId,kind:'decision'}});await audit(j.userId,j.trialId,'NOTIFICATION_SENT','Decision notification sent.')}}else await execute(j.userId,j.trialId);await db.delete('jobs',[j.id])}catch(e){console.error('durable job failed',j.id);if(j.attempts===0){await addNotice(j.userId,{kind:'cancellation_failed',title:'Scheduled protection action failed',message:'Trialvisor could not complete a scheduled action. Review this item before its billing deadline.',severity:'critical',trialId:j.trialId,actionView:'overview'});await audit(j.userId,j.trialId,'CANCELLATION_FAILED','Scheduled protection action failed and remains unresolved.')}if(j.attempts>=3)await db.delete('jobs',[j.id]);else await db.update('jobs',[{id:j.id,record:{...j,attempts:j.attempts+1}}])}}return{statusCode:200}};
-const SESSION_IDLE_TIMEOUT_MS=30*60*1000;
-const SESSION_ABSOLUTE_LIFETIME_MS=12*60*60*1000;
-const SENSITIVE_ACTION_MAX_AGE_MS=15*60*1000;
-type UserSession={id?:string;userId:string;createdAt:string;lastActiveAt:string;invalidatedAt?:string;reason?:'user_signout'|'idle_timeout'|'absolute_timeout'|'superseded'|'recent_activity_required'};
-const getSessionId=(c:RouterContext):string|undefined=>{
-  const qSid=c.query?.sessionId;
-  if(typeof qSid==='string'&&qSid.trim())return qSid.trim();
-  const bSid=(c.body as {sessionId?:string}|undefined)?.sessionId;
-  if(typeof bSid==='string'&&bSid.trim())return bSid.trim();
-  const rawHeaders=(c.event as {headers?:Record<string,string>}|undefined)?.headers;
-  if(rawHeaders){
-    const hSid=rawHeaders['x-session-id']||rawHeaders['X-Session-Id'];
-    if(typeof hSid==='string'&&hSid.trim())return hSid.trim();
-  }
-  return undefined;
-};
-const resolveSession=async(u:string,sessionId?:string):Promise<(UserSession&{id:string})|null>=>{
-  if(sessionId){
-    const [s]=await db.get<UserSession>(table(u,'sessions'),[sessionId]);
-    if(s&&s.userId===u)return {...s,id:sessionId};
-    return null;
-  }
-  const active=(await db.list<UserSession>(table(u,'sessions'),{limit:20})).items.filter(s=>!s.invalidatedAt);
-  if(active.length===1)return active[0];
-  return null;
-};
-const cleanupSessions=async(u:string)=>{
-  const records=(await db.list<UserSession>(table(u,'sessions'),{limit:50})).items;
-  const now=Date.now(),toDelete:string[]=[];
-  for(const r of records){
-    const created=new Date(r.createdAt).getTime();
-    const isPastAbsolute=!isNaN(created)&&now-created>SESSION_ABSOLUTE_LIFETIME_MS;
-    if(r.invalidatedAt){
-      const inval=new Date(r.invalidatedAt).getTime();
-      if(!isNaN(inval)&&now-inval>3600000)toDelete.push(r.id);
-    }else if(isPastAbsolute){
-      toDelete.push(r.id);
-    }
-  }
-  if(toDelete.length)await db.delete(table(u,'sessions'),toDelete);
-};
+const cleanupSessions=(u:string)=>cleanupSessionsRecords(db,u);
+const resolveSession=(u:string,sid?:string)=>resolveSessionRecord(db,u,sid);
 const enforceSession=(opts:{touchActivity?:boolean;sensitive?:boolean}={})=>{
   return async(c:RouterContext)=>{
-    if(!c.user?.userId)return error('Unauthorized',401);
-    const u=c.user.userId;
     const sid=getSessionId(c);
-    const session=await resolveSession(u,sid);
-    const now=Date.now();
-    if(!session||session.invalidatedAt){
-      return error('session_expired',401);
-    }
-    const lastActiveTime=new Date(session.lastActiveAt).getTime();
-    const createdTime=new Date(session.createdAt).getTime();
-    if(now-lastActiveTime>SESSION_IDLE_TIMEOUT_MS){
-      await db.update(table(u,'sessions'),[{id:session.id,record:{...session,invalidatedAt:new Date(now).toISOString(),reason:'idle_timeout'}}]);
-      return error('session_idle_timeout',401);
-    }
-    if(now-createdTime>SESSION_ABSOLUTE_LIFETIME_MS){
-      await db.update(table(u,'sessions'),[{id:session.id,record:{...session,invalidatedAt:new Date(now).toISOString(),reason:'absolute_timeout'}}]);
-      return error('session_absolute_timeout',401);
-    }
-    if(opts.sensitive){
-      if(now-lastActiveTime>SENSITIVE_ACTION_MAX_AGE_MS||now-createdTime>SENSITIVE_ACTION_MAX_AGE_MS){
-        return error('recent_activity_required',403);
-      }
-    }
-    if(opts.touchActivity){
-      await db.update(table(u,'sessions'),[{id:session.id,record:{...session,lastActiveAt:new Date(now).toISOString()}}]);
-    }
+    const res=await evaluateSession(db,c.user?.userId,sid,opts);
+    if(!res.ok)return error(res.code,res.status);
     return undefined;
   };
 };
@@ -239,13 +178,7 @@ export const handler=router({
     const u=c.user!.userId,now=new Date().toISOString();
     const sid=getSessionId(c);
     const b=(c.body||{}) as {everywhere?:boolean};
-    if(b.everywhere||!sid){
-      const active=(await db.list<UserSession>(table(u,'sessions'),{limit:20})).items.filter(s=>!s.invalidatedAt);
-      if(active.length)await db.update(table(u,'sessions'),active.map(s=>({id:s.id,record:{...s,invalidatedAt:now,reason:'user_signout'}})));
-    }else{
-      const [target]=await db.get<UserSession>(table(u,'sessions'),[sid]);
-      if(target&&target.userId===u)await db.update(table(u,'sessions'),[{id:sid,record:{...target,invalidatedAt:now,reason:'user_signout'}}]);
-    }
+    await invalidateSessionRecord(db,u,sid,b.everywhere,now);
     return json({ok:true});
   }],
  'GET /api/billing/status':[requireAuth(),enforceSession(),async c=>json(await billingSnapshot(c.user!.userId))],
