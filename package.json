@@ -9,7 +9,9 @@
         "preview": "vite preview",
         "typecheck": "tsc --noEmit --noUnusedLocals false --noUnusedParameters false",
         "typecheck:billing": "tsc -p tsconfig.billing.json",
-        "typecheck:backend": "tsc -p tsconfig.backend.json"
+        "typecheck:backend": "tsc -p tsconfig.backend.json",
+        "test": "node --experimental-strip-types --test tests/*.test.ts",
+        "verify": "npm run typecheck && npm run typecheck:backend && npm run typecheck:billing && npm test && npm run build"
     },
     "dependencies": {
         "lucide-react": "^0.469.0",

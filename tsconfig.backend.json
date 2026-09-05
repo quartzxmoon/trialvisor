@@ -10,6 +10,7 @@
   "include": [
     "backend/index.ts",
     "backend/billing.ts",
+    "backend/provider-signals.ts",
     "backend/appdeploy-sdk.d.ts"
   ]
 }
