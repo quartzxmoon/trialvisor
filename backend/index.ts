@@ -165,7 +165,7 @@ const enforceSession=(opts:{touchActivity?:boolean;sensitive?:boolean}={})=>{
   return async(c:RouterContext)=>{
     const sid=getSessionId(c);
     const res=await evaluateSession(db,c.user?.userId,sid,opts);
-    if(!res.ok)return error(res.code,res.status);
+    if(res.ok===false)return error(res.code,res.status);
     return undefined;
   };
 };
