@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { canvaCancellationEvidence, classifySignal, extractProvider, formatCalendarDate, type GmailMessage } from '../backend/provider-signals.ts';
+import { canvaCancellationEvidence, classifySignal, extractProvider, formatCalendarDate, nextHistoryCheckpoint, type GmailMessage } from '../backend/provider-signals.ts';
 
 const encoded=(value:string)=>Buffer.from(value).toString('base64url');
 const message=(subject:string,body:string,from:string,authenticationResults?:string):GmailMessage=>({
@@ -163,4 +163,10 @@ test('E. MONTHLY PRICE: $14.99/month is not misrepresented as a provider annual 
   assert.equal(result.price, 14.99);
   assert.equal(result.currency, 'USD');
   assert.ok(!/annual/i.test(result.plan), 'plan name must not invent annual billing');
+});
+
+test('does not advance Gmail history while candidate retrieval needs retry',()=>{
+  assert.equal(nextHistoryCheckpoint('new-history','old-history',1),'old-history');
+  assert.equal(nextHistoryCheckpoint('new-history',undefined,1),'');
+  assert.equal(nextHistoryCheckpoint('new-history','old-history',0),'new-history');
 });

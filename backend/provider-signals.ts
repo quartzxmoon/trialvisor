@@ -6,6 +6,7 @@ const decodeB64Url=(s:string)=>{try{return new TextDecoder().decode(Uint8Array.f
 const plainText=(value:string)=>value.replace(/<style[\s\S]*?<\/style>/gi,' ').replace(/<script[\s\S]*?<\/script>/gi,' ').replace(/<br\s*\/?>/gi,'\n').replace(/<\/p>/gi,'\n').replace(/<[^>]+>/g,' ').replace(/&nbsp;/gi,' ').replace(/&amp;/gi,'&').replace(/&lt;/gi,'<').replace(/&gt;/gi,'>').replace(/&#39;/g,"'").replace(/&quot;/gi,'"');
 
 export const providerSupport=(provider:string):{support:ProviderSupport;tier:'3';cancellationUrl?:string}=>/\bcanva\b/i.test(provider)?{support:'GUIDED',tier:'3',cancellationUrl:CANVA_CANCEL_URL}:{support:'NOT_SUPPORTED',tier:'3'};
+export const nextHistoryCheckpoint=(profileHistoryId:string,priorHistoryId:string|undefined,fetchFailures:number)=>fetchFailures>0?(priorHistoryId||''):profileHistoryId;
 
 const messageText=(m:GmailMessage)=>{
  const headers=m.payload?.headers||[],header=(name:string)=>headers.find(h=>h.name.toLowerCase()===name)?.value||'';
