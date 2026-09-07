@@ -7,5 +7,5 @@
     "noEmit": true,
     "skipLibCheck": true
   },
-  "include": ["backend/billing.ts", "backend/appdeploy-sdk.d.ts"]
+  "include": ["backend/billing.ts", "backend/billing-state.ts", "backend/appdeploy-sdk.d.ts"]
 }

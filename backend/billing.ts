@@ -1,34 +1,10 @@
 import Stripe from 'stripe';
 import { db, error, json, notifications, secrets } from '@appdeploy/sdk';
+import { ACTIVE_BILLING_STATUSES, APPROVED_PRICE_IDS, CHECKOUT_BLOCKED_STATUSES, billingPresentation, checkoutCompletionPatch, isProBilling, priceForCadence, projectSubscription, selectCanonicalSubscription, stripeEventMarkerKey, type BillingRecord, type StripeSubscriptionLike } from './billing-state';
 
 const APP_URL='https://trialvisor-m8vrsu.v2.appdeploy.ai/';
-const STRIPE_PRICE_PRO_MONTHLY='price_1UBuOfGTXvZ0TX3Afx0TbBsm';
-const STRIPE_PRICE_PRO_ANNUAL='price_1UBuSLGTXvZ0TX3AtAl720ek';
 const REQUIRED_SECRETS=['STRIPE_RESTRICTED_KEY','STRIPE_WEBHOOK_SECRET'];
-export const ACTIVE_STATUSES=new Set(['active','trialing']);
-const APPROVED_PRICE_IDS=new Set([STRIPE_PRICE_PRO_MONTHLY,STRIPE_PRICE_PRO_ANNUAL]);
-const CHECKOUT_BLOCKED_STATUSES=new Set(['active','trialing','pending','past_due','unpaid','paused','incomplete','unrecognized_price']);
-
-type BillingRecord={
-  id?:string;
-  userId:string;
-  customerId?:string;
-  subscriptionId?:string;
-  status:string;
-  plan:'FREE'|'PRO';
-  cadence?:'monthly'|'annual';
-  priceId?:string;
-  currentPeriodEnd?:string;
-  cancelAtPeriodEnd?:boolean;
-  lastCheckoutAt?:string;
-  lastCheckoutSessionId?:string;
-  lastStripeEventId?:string;
-  lastStripeEventCreated?:number;
-  lastCheckoutEventCreated?:number;
-  lastSubscriptionEventCreated?:number;
-  lastInvoiceEventCreated?:number;
-  updatedAt:string;
-};
+export const ACTIVE_STATUSES=ACTIVE_BILLING_STATUSES;
 type CustomerBinding={id?:string;customerId:string;userId:string;boundAt:string};
 
 const billingTable=(userId:string)=>'billing:'+userId;
@@ -61,6 +37,7 @@ const saveBilling=async(userId:string,patch:Partial<BillingRecord>)=>{
     lastCheckoutEventCreated:patch.lastCheckoutEventCreated??current?.lastCheckoutEventCreated,
     lastSubscriptionEventCreated:patch.lastSubscriptionEventCreated??current?.lastSubscriptionEventCreated,
     lastInvoiceEventCreated:patch.lastInvoiceEventCreated??current?.lastInvoiceEventCreated,
+    lastReconciledAt:patch.lastReconciledAt??current?.lastReconciledAt,
     updatedAt:new Date().toISOString()
   };
   if(current){const [ok]=await db.update(billingTable(userId),[{id:current.id,record:next}]);if(!ok)throw new Error('billing_update_failed')}
@@ -68,7 +45,6 @@ const saveBilling=async(userId:string,patch:Partial<BillingRecord>)=>{
   return next;
 };
 const safeId=(value:unknown,prefix:string)=>typeof value==='string'&&value.startsWith(prefix)?value:undefined;
-const periodEnd=(seconds:unknown)=>typeof seconds==='number'?new Date(seconds*1000).toISOString():undefined;
 const randomLetters=(length:number)=>Array.from(crypto.getRandomValues(new Uint8Array(length)),byte=>String.fromCharCode(97+(byte%26))).join('');
 const rawBody=(event:any)=>{
   const value=typeof event?.body==='string'?event.body:'';
@@ -80,7 +56,6 @@ const header=(event:any,name:string)=>{
   const headers=(event?.headers||{}) as Record<string,string|undefined>,target=name.toLowerCase();
   return Object.entries(headers).find(([key])=>key.toLowerCase()===target)?.[1];
 };
-const eventMarker=(eventId:string)=>'stripe-event:'+eventId;
 const ensureCustomerBinding=async(customerId:string,userId:string,allowCreate:boolean)=>{
   const existing=(await db.list<CustomerBinding>(customerBindingTable(customerId),{limit:2})).items;
   if(existing.length){if(existing.some(binding=>binding.userId!==userId))throw new Error('stripe_customer_tenant_mismatch');return}
@@ -89,12 +64,45 @@ const ensureCustomerBinding=async(customerId:string,userId:string,allowCreate:bo
   if(!id)throw new Error('stripe_customer_binding_failed');
 };
 
+const reconcileFresh=(record?:BillingRecord)=>!!record?.lastReconciledAt&&Date.now()-new Date(record.lastReconciledAt).getTime()<60_000;
+const subscriptionSearchUser=(userId:string)=>{
+  if(!/^[A-Za-z0-9_-]{8,100}$/.test(userId))throw new Error('invalid_billing_tenant_identifier');
+  return `metadata['trialvisor_user_id']:'${userId}'`;
+};
+const asSubscriptionLike=(value:Stripe.Subscription)=>value as unknown as StripeSubscriptionLike;
+
+export const reconcileBilling=async(userId:string,force=false)=>{
+  const current=await currentBilling(userId);
+  if(!force&&reconcileFresh(current))return current;
+  const stripe=await stripeClient(),found=new Map<string,Stripe.Subscription>();
+  if(current?.subscriptionId){
+    try{const subscription=await stripe.subscriptions.retrieve(current.subscriptionId);found.set(subscription.id,subscription)}
+    catch(e){const status=(e as {statusCode?:number}).statusCode;if(status!==404)throw e}
+  }
+  const searched=await stripe.subscriptions.search({query:subscriptionSearchUser(userId),limit:100});
+  for(const subscription of searched.data)found.set(subscription.id,subscription);
+  const selected=selectCanonicalSubscription([...found.values()].map(asSubscriptionLike),userId),now=new Date().toISOString();
+  if(current?.status==='checkout_pending'&&(!selected||selected.status==='canceled'||selected.status==='incomplete_expired'))return saveBilling(userId,{lastReconciledAt:now});
+  if(!selected){
+    if(!current)return saveBilling(userId,{status:'inactive',plan:'FREE',lastReconciledAt:now});
+    return saveBilling(userId,{status:'inactive',plan:'FREE',subscriptionId:'',priceId:'',cadence:undefined,currentPeriodEnd:'',cancelAtPeriodEnd:false,lastReconciledAt:now});
+  }
+  const projection=projectSubscription(selected,userId);
+  if(!projection)throw new Error('stripe_subscription_projection_failed');
+  await ensureCustomerBinding(projection.customerId!,userId,true);
+  return saveBilling(userId,{...projection,lastReconciledAt:now});
+};
+
 export const billingSnapshot=async(userId:string)=>{
-  const configured=await billingConfigured(),record=await currentBilling(userId);
+  const configured=await billingConfigured();
+  let record:BillingRecord|undefined=await currentBilling(userId),reconciliation:'synced'|'stale'|'error'=configured?'stale':'synced';
+  if(configured){
+    try{record=await reconcileBilling(userId);reconciliation='synced'}
+    catch{console.error('Stripe billing reconciliation failed');reconciliation='error'}
+  }
   return{
     configured,
-    plan:record&&ACTIVE_STATUSES.has(record.status)&&!!record.priceId&&APPROVED_PRICE_IDS.has(record.priceId)?'PRO':'FREE',
-    status:record?.status||'inactive',
+    ...billingPresentation(record,configured,reconciliation),
     cadence:record?.cadence||null,
     currentPeriodEnd:record?.currentPeriodEnd||null,
     cancelAtPeriodEnd:!!record?.cancelAtPeriodEnd,
@@ -103,25 +111,28 @@ export const billingSnapshot=async(userId:string)=>{
 };
 
 export const hasProEntitlement=async(userId:string)=>{
-  const record=await currentBilling(userId);
-  return !!record&&ACTIVE_STATUSES.has(record.status)&&!!record.priceId&&APPROVED_PRICE_IDS.has(record.priceId);
+  let record:BillingRecord|undefined=await currentBilling(userId);
+  if(await billingConfigured()){try{record=await reconcileBilling(userId)}catch{console.error('Stripe entitlement reconciliation failed')}}
+  return isProBilling(record);
 };
 
 export const createCheckout=async(userId:string,email:string|undefined,cadence:unknown)=>{
   if(!await billingConfigured())return error('Stripe billing is not configured',503);
   if(cadence!=='monthly'&&cadence!=='annual')return error('Choose monthly or annual billing',400);
-  const current=await currentBilling(userId),stripe=await stripeClient();
+  const stripe=await stripeClient();
+  let current:BillingRecord|undefined;
+  try{current=await reconcileBilling(userId,true)}catch{console.error('Stripe checkout reconciliation failed');return error('Current billing status could not be verified with Stripe. Please retry.',503)}
   if(current&&CHECKOUT_BLOCKED_STATUSES.has(current.status))return error('An existing Stripe subscription or completed Checkout requires attention before another subscription can be created',409);
   if(current?.status==='checkout_pending'&&current.lastCheckoutSessionId){
     const previous=await stripe.checkout.sessions.retrieve(current.lastCheckoutSessionId);
     if(previous.status==='complete')return error('Checkout completed. Trialvisor is waiting for Stripe billing confirmation before another subscription can be created',409);
     if(previous.status==='open'){
-      if(current.lastCheckoutAt&&Date.now()-new Date(current.lastCheckoutAt).getTime()<15*60*1000)return error('A Checkout session is already open. Return to it or wait before starting another',429);
-      await stripe.checkout.sessions.expire(current.lastCheckoutSessionId);
+      if(previous.url)return json({url:previous.url,reused:true});
+      return error('The existing Stripe Checkout could not be resumed. Please wait for it to expire and retry.',409);
     }
   }
   if(current?.lastCheckoutAt&&Date.now()-new Date(current.lastCheckoutAt).getTime()<60000)return error('A checkout session was just created. Please wait before trying again.',429);
-  const priceId=cadence==='monthly'?STRIPE_PRICE_PRO_MONTHLY:STRIPE_PRICE_PRO_ANNUAL;
+  const priceId=priceForCadence(cadence)!;
   if(current?.customerId)await ensureCustomerBinding(current.customerId,userId,false);
   const params:Stripe.Checkout.SessionCreateParams={
     mode:'subscription',
@@ -136,15 +147,16 @@ export const createCheckout=async(userId:string,email:string|undefined,cadence:u
   };
   if(current?.customerId)params.customer=current.customerId;
   else if(email)params.customer_email=email;
-  const session=await stripe.checkout.sessions.create(params);
+  const session=await stripe.checkout.sessions.create(params,{idempotencyKey:`trialvisor-checkout-${userId}-${cadence}-${Math.floor(Date.now()/60000)}`});
   if(!session.url)return error('Stripe did not return a checkout URL',502);
-  await saveBilling(userId,{status:'checkout_pending',plan:'FREE',cadence,subscriptionId:'',priceId:'',currentPeriodEnd:'',cancelAtPeriodEnd:false,lastCheckoutAt:new Date().toISOString(),lastCheckoutSessionId:session.id});
+  await saveBilling(userId,{status:'checkout_pending',plan:'FREE',cadence,subscriptionId:'',priceId:'',currentPeriodEnd:'',cancelAtPeriodEnd:false,lastCheckoutAt:new Date().toISOString(),lastCheckoutSessionId:session.id,lastReconciledAt:''});
   return json({url:session.url});
 };
 
 export const createPortal=async(userId:string)=>{
   if(!await billingConfigured())return error('Stripe billing is not configured',503);
-  const current=await currentBilling(userId);
+  let current:BillingRecord|undefined;
+  try{current=await reconcileBilling(userId,true)}catch{console.error('Stripe portal reconciliation failed');return error('Current billing status could not be verified with Stripe. Please retry.',503)}
   if(!current?.customerId)return error('No Stripe customer exists for this account',409);
   await ensureCustomerBinding(current.customerId,userId,false);
   const stripe=await stripeClient(),session=await stripe.billingPortal.sessions.create({customer:current.customerId,return_url:APP_URL+'?billing=portal'});
@@ -162,8 +174,8 @@ const applyStripeEvent=async(event:Stripe.Event)=>{
     if((prior.lastCheckoutEventCreated||0)>event.created)return;
     if(prior.customerId&&prior.customerId!==customerId)throw new Error('stripe_customer_ownership_mismatch');
     await ensureCustomerBinding(customerId,userId,true);
-    const isAlreadyActive=!!prior&&(ACTIVE_STATUSES.has(prior.status)||prior.plan==='PRO');
-    await saveBilling(userId,{customerId,subscriptionId:safeId(session.subscription,'sub_')||prior.subscriptionId,status:isAlreadyActive?prior.status:'pending',plan:isAlreadyActive?'PRO':'FREE',cadence:session.metadata?.trialvisor_cadence==='annual'?'annual':'monthly',lastStripeEventId:event.id,lastStripeEventCreated:event.created,lastCheckoutEventCreated:event.created});
+    const checkoutPatch=checkoutCompletionPatch(prior,{customerId,subscriptionId:safeId(session.subscription,'sub_'),cadence:session.metadata?.trialvisor_cadence==='annual'?'annual':'monthly'}),isAlreadyActive=checkoutPatch.plan==='PRO';
+    await saveBilling(userId,{...checkoutPatch,lastStripeEventId:event.id,lastStripeEventCreated:event.created,lastCheckoutEventCreated:event.created,lastReconciledAt:new Date().toISOString()});
     if(!isAlreadyActive){await billingNotice(userId,'Checkout completed','Trialvisor is waiting for Stripe’s signed subscription event before activating paid access.','info')}
     return;
   }
@@ -177,9 +189,11 @@ const applyStripeEvent=async(event:Stripe.Event)=>{
     if(prior.customerId&&prior.customerId!==customerId)throw new Error('stripe_customer_ownership_mismatch');
     if(prior.subscriptionId&&prior.subscriptionId!==subscription.id)throw new Error('stripe_subscription_ownership_mismatch');
     await ensureCustomerBinding(customerId,userId,true);
-    const item=subscription.items.data[0],price=item?.price,recognized=price?.id===STRIPE_PRICE_PRO_MONTHLY||price?.id===STRIPE_PRICE_PRO_ANNUAL,cadence=price?.id===STRIPE_PRICE_PRO_ANNUAL?'annual':'monthly',active=recognized&&ACTIVE_STATUSES.has(subscription.status);
-    if(!recognized){await saveBilling(userId,{customerId,subscriptionId:subscription.id,status:'unrecognized_price',plan:'FREE',priceId:price?.id,lastStripeEventId:event.id,lastStripeEventCreated:event.created,lastSubscriptionEventCreated:event.created});await billingNotice(userId,'Billing configuration review required','Stripe reported a subscription Price that is not approved for Trialvisor Pro. Paid access was not granted.','critical');return}
-    await saveBilling(userId,{customerId,subscriptionId:subscription.id,status:subscription.status,plan:active?'PRO':'FREE',cadence,priceId:price.id,currentPeriodEnd:periodEnd(item?.current_period_end),cancelAtPeriodEnd:subscription.cancel_at_period_end,lastStripeEventId:event.id,lastStripeEventCreated:event.created,lastSubscriptionEventCreated:event.created});
+    const projection=projectSubscription(asSubscriptionLike(subscription));
+    if(!projection)throw new Error('stripe_subscription_projection_failed');
+    const recognized=!!projection.priceId&&APPROVED_PRICE_IDS.has(projection.priceId),active=projection.plan==='PRO';
+    if(!recognized){await saveBilling(userId,{...projection,lastStripeEventId:event.id,lastStripeEventCreated:event.created,lastSubscriptionEventCreated:event.created,lastReconciledAt:new Date().toISOString()});await billingNotice(userId,'Billing configuration review required','Stripe reported a subscription Price that is not approved for Trialvisor Pro. Paid access was not granted.','critical');return}
+    await saveBilling(userId,{...projection,lastStripeEventId:event.id,lastStripeEventCreated:event.created,lastSubscriptionEventCreated:event.created,lastReconciledAt:new Date().toISOString()});
     if(prior?.status!==subscription.status){if(subscription.status==='past_due'||subscription.status==='unpaid'){await billingNotice(userId,'Billing action required','Update your payment method to keep Trialvisor protection features active.','critical');await notifications.send({userIds:[userId],notification:{title:'Billing action required',body:'Update your payment method to keep Trialvisor protection features active.'},data:{kind:'billing',status:subscription.status}})}else if(active)await billingNotice(userId,'Trialvisor Pro active','Paid access was activated only after Stripe’s signed subscription event was verified.','success');else if(event.type==='customer.subscription.deleted')await billingNotice(userId,'Paid plan ended','Trialvisor Pro is no longer active. Your retained account data remains available under the current free-plan rules.','warning')}
     return;
   }
@@ -194,7 +208,7 @@ export const handleStripeWebhook=async(event:any)=>{
   const stripe=await stripeClient(),endpointSecret=await secrets.readSecret('STRIPE_WEBHOOK_SECRET');
   let stripeEvent:Stripe.Event;
   try{stripeEvent=stripe.webhooks.constructEvent(body,signature,endpointSecret)}catch{console.warn('Stripe webhook signature verification failed');return error('Invalid Stripe webhook signature',400)}
-  const marker=eventMarker(stripeEvent.id),seen=(await db.list(marker,{limit:1})).items;
+  const marker=stripeEventMarkerKey(stripeEvent.id),seen=(await db.list(marker,{limit:1})).items;
   if(seen.length)return json({received:true,duplicate:true});
   await applyStripeEvent(stripeEvent);
   const [saved]=await db.add(marker,[{eventId:stripeEvent.id,type:stripeEvent.type,processedAt:new Date().toISOString()}]);

@@ -10,6 +10,7 @@
   "include": [
     "backend/index.ts",
     "backend/billing.ts",
+    "backend/billing-state.ts",
     "backend/provider-signals.ts",
     "backend/paged-records.ts",
     "backend/session.ts",
