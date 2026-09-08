@@ -1,10 +1,10 @@
 import { router, json, error, requireAuth, db, notifications, secrets, type RouterContext } from '@appdeploy/sdk';
 import { ACTIVE_STATUSES, billingConfigured, billingSnapshot, createCheckout, createPortal, currentBilling, handleStripeWebhook, hasProEntitlement } from './billing';
-import { canvaCancellationEvidence, classifyMessage, exposureSummary, mergeSourceReferences, nextHistoryCheckpoint, providerSupport, sameSubscriptionEntity, type EnrollmentStatus, type ExposureStatus, type GmailMessage, type ProviderSupport, type SourceReference } from './provider-signals';
+import { canvaCancellationEvidence, classifyMessage, classifySignal, exposureSummary, isPromotionalContent, mergeSourceReferences, nextHistoryCheckpoint, providerSupport, sameSubscriptionEntity, type EnrollmentStatus, type ExposureStatus, type GmailMessage, type ProviderSupport, type SignalKind, type SourceReference } from './provider-signals';
 import { deleteAllRecords as deleteAllPagedRecords, listAllMatching } from './paged-records';
 import { SESSION_IDLE_TIMEOUT_MS, SESSION_ABSOLUTE_LIFETIME_MS, SENSITIVE_ACTION_MAX_AGE_MS, getSessionId, resolveSession as resolveSessionRecord, cleanupSessions as cleanupSessionsRecords, evaluateSession, invalidateSession as invalidateSessionRecord, type UserSession } from './session';
-type State='REVIEW_REQUIRED'|'AUTO_CANCEL_ENABLED'|'DECISION_PENDING'|'KEEP_REQUESTED'|'CANCELLATION_RUNNING'|'CANCELLATION_NEEDS_USER'|'CANCELED_CONFIRMED';
-type Trial={id?:string;userId:string;provider:string;plan:string;price:number;currency:string;billingCadence?:'monthly'|'annual'|'unknown';providerSubscriptionId?:string;trialEnd:string;safeDeadline:string;plannedExecution:string;state:State;tier:string;support?:ProviderSupport;confidence:number;confidenceBand?:'HIGH'|'MEDIUM'|'LOW';enrollmentStatus?:EnrollmentStatus;exposureStatus?:ExposureStatus;protectEligible?:boolean;classificationReason?:string;hasDetectedChargeDate?:boolean;userConfirmedEnrollmentAt?:string;archivedAt?:string;sourceRef?:SourceReference;supportingSourceRefs?:SourceReference[];verificationRef?:{provider:'google';messageId:string;threadId:string;receivedAt?:string};evidence?:string;nextAction?:string;authorizationAt?:string;providerActionAt?:string;cancellationUrl?:string;providerTrialEndDate?:string;hasExplicitTime?:boolean};
+type State='REVIEW_REQUIRED'|'AUTO_CANCEL_ENABLED'|'DECISION_PENDING'|'KEEP_REQUESTED'|'CANCELLATION_RUNNING'|'CANCELLATION_NEEDS_USER'|'CANCELED_CONFIRMED'|'DISMISSED';
+type Trial={id?:string;userId:string;provider:string;plan:string;price:number;currency:string;billingCadence?:'monthly'|'annual'|'unknown';providerSubscriptionId?:string;trialEnd?:string;safeDeadline?:string;plannedExecution?:string;state:State;tier:string;support?:ProviderSupport;confidence:number;confidenceBand?:'HIGH'|'MEDIUM'|'LOW';enrollmentStatus?:EnrollmentStatus;exposureStatus?:ExposureStatus;protectEligible?:boolean;classificationReason?:string;hasDetectedChargeDate?:boolean;userConfirmedEnrollmentAt?:string;archivedAt?:string;sourceRef?:SourceReference;supportingSourceRefs?:SourceReference[];verificationRef?:{provider:'google';messageId:string;threadId:string;receivedAt?:string};evidence?:string;nextAction?:string;authorizationAt?:string;providerActionAt?:string;cancellationUrl?:string;providerTrialEndDate?:string;hasExplicitTime?:boolean;kind?:SignalKind;dismissedAt?:string;dismissReason?:string};
 type Job={userId:string;trialId:string;kind:'DECISION'|'CANCEL';dueAt:string;status:'PENDING'|'REVOKED'|'DONE';attempts:number;idempotencyKey:string};
 type OAuthState={userId:string;provider:'google';nonceHash:string;createdAt:string;expiresAt:string;usedAt?:string};
 type GoogleTokenRecord={id:string;userId:string;provider:'google';providerAccountIdentifier:string;ciphertext:string;iv:string;tokenExpiration:string;authorizedScopes:string;createdAt:string;updatedAt:string;revokedAt?:string};
@@ -97,7 +97,7 @@ const syncGoogle=async(u:string)=>{
     for(const item of batch){
      scanned++;
      if(!item.ok){fetchFailures++;continue}
-     const id=item.id,message=item.message,prior=seenById.get(id);
+     const id=item.id,message=item.message,prior=seenById.get(id);if(prior&&(prior.kind==='user_dismissed'||prior.kind==='promotional_suppressed'))continue;
      const evidence=canvaCancellationEvidence(message);
      if(evidence){
       const eligible=existingTrials.filter(t=>!!t.id&&/\bcanva\b/i.test(t.provider)&&(t.support||providerSupport(t.provider).support)==='GUIDED'&&['AUTO_CANCEL_ENABLED','DECISION_PENDING','CANCELLATION_RUNNING','CANCELLATION_NEEDS_USER'].includes(t.state)&&!!t.authorizationAt&&new Date(evidence.receivedAt).getTime()>=new Date(t.authorizationAt!).getTime());
@@ -172,8 +172,61 @@ const customerActivity=(a:any)=>({id:a.id,type:a.type,trialId:a.trialId,title:ac
 const ensureAccount=async(u:string)=>{const records=(await db.list<any>(table(u,'account'),{limit:20})).items,now=new Date().toISOString();if(records.length){if(records.every(x=>x.lifecycleVersion===3))return records[0];const corrected=records.map(x=>({...x,lifecycleVersion:3,onboardingComplete:false,onboardingCompletedAt:undefined,guidanceShown:Array.isArray(x.guidanceShown)?x.guidanceShown:[]}));await db.update(table(u,'account'),corrected.map(x=>({id:x.id,record:x})));return corrected[0]}const record={userId:u,lifecycleVersion:3,initializedAt:now,onboardingComplete:false,guidanceShown:[] as string[]};const [id]=await db.add(table(u,'account'),[record]);return{...record,id}};
 const integrationDiagnostics=async(u:string)=>{const tokens=(await db.list<GoogleTokenRecord>(table(u,'google-tokens'),{limit:10})).items,active=tokens.filter(x=>!x.revokedAt&&!!x.ciphertext),sync=(await db.list<any>(table(u,'google-sync'),{limit:10})).items,sources=(await db.list<any>(table(u,'gmail-sources'),{limit:500})).items,trials=await listTrials(u),audits=(await db.list<any>(table(u,'audit'),{limit:100})).items;return{tenantUserId:u,google:{connected:active.length>0,accountCount:active.length,encryptedRecords:active.map(x=>({providerAccountIdentifier:x.providerAccountIdentifier,ciphertextPresent:!!x.ciphertext,ivPresent:!!x.iv,tokenExpiration:x.tokenExpiration,authorizedScopes:x.authorizedScopes,updatedAt:x.updatedAt})),callbackValidated:audits.some(x=>x.type==='ACCOUNT_CONNECTED'&&String(x.detail).includes('production OAuth')),refreshObserved:audits.some(x=>x.type==='GOOGLE_TOKEN_REFRESHED'),localDestructionObserved:tokens.some(x=>!!x.revokedAt&&!x.ciphertext&&!x.iv),remoteRevocationAttempted:audits.some(x=>x.type==='GOOGLE_REMOTE_REVOCATION_ATTEMPTED')},gmail:{checkpointCount:sync.length,historyCheckpointPresent:sync.some(x=>!!x.historyId),lastSync:sync.map(x=>x.lastSync).sort().at(-1)||null,lastResults:sync.map(x=>({providerAccountIdentifier:x.providerAccountIdentifier,lastSync:x.lastSync,historyCheckpointPresent:!!x.historyId,lastResult:x.lastResult||null})),processedReferences:sources.length,matchedReferences:sources.filter(x=>x.matched).length,retainedFullBodies:false,confidence:{HIGH:trials.filter(x=>x.confidenceBand==='HIGH').length,MEDIUM:trials.filter(x=>x.confidenceBand==='MEDIUM').length,LOW:trials.filter(x=>x.confidenceBand==='LOW').length},reviewOnly:trials.filter(x=>!!x.sourceRef).every(x=>x.state==='REVIEW_REQUIRED'||(!!x.authorizationAt&&audits.some(a=>a.trialId===x.id&&a.type==='AUTHORIZATION_GRANTED')))}}};
 const config=async()=>{const n=await secrets.listSecretNames();return{google:n.includes('GOOGLE_CLIENT_ID')&&n.includes('GOOGLE_CLIENT_SECRET')&&n.includes('GOOGLE_TOKEN_ENCRYPTION_KEY'),microsoft:n.includes('MICROSOFT_CLIENT_ID')&&n.includes('MICROSOFT_CLIENT_SECRET'),stripe:await billingConfigured(),email:n.includes('RESEND_API_KEY')}};
-const normalizeTrial=(t:Trial):Trial=>{const legacyDetected=!!t.sourceRef&&!t.authorizationAt&&!t.userConfirmedEnrollmentAt,enrollmentStatus=t.enrollmentStatus||(legacyDetected?'POSSIBLE':'ACTIVE'),hasDetectedChargeDate=t.hasDetectedChargeDate??!!t.providerTrialEndDate,exposureStatus=t.exposureStatus||(enrollmentStatus==='ACTIVE'&&hasDetectedChargeDate&&t.price>0?'CONFIRMED':'UNCONFIRMED'),protectEligible=t.protectEligible??(enrollmentStatus==='ACTIVE'&&hasDetectedChargeDate);return{...t,...providerSupport(t.provider),enrollmentStatus,hasDetectedChargeDate,exposureStatus,protectEligible}};
-const listTrials=async(u:string)=>(await db.list<Trial>(table(u,'trials'),{limit:50})).items.map(normalizeTrial).filter(t=>!t.archivedAt&&t.enrollmentStatus!=='PROMOTIONAL');
+export const reprocessV4Findings = async (u: string) => {
+  const allTrials = (await db.list<Trial>(table(u, 'trials'), { limit: 100 })).items;
+  const updates: Array<{ id: string; record: Trial }> = [];
+  const now = new Date().toISOString();
+  for (const t of allTrials) {
+    if(!t.id||t.state!=='REVIEW_REQUIRED')continue;
+    const isPromo = isPromotionalContent(t.plan, t.plan + ' ' + t.provider) ||
+      /\b(?:droplist|price drop|switch and save|visa prepaid|trade-in|start your free trial|try for free|discount code|promo code)\b/i.test(t.plan);
+    if (isPromo) {
+      const updated: Trial = {
+        ...t,
+        kind: 'PROMOTIONAL',
+        enrollmentStatus: 'PROMOTIONAL',
+        exposureStatus: 'EXCLUDED',
+        state: 'DISMISSED',
+        dismissedAt: now,
+        dismissReason: 'v5 recovery migration: promotional marketing finding dismissed',
+        price: 0,
+        trialEnd: undefined,
+        providerTrialEndDate: undefined,
+        hasExplicitTime: false,
+        safeDeadline: undefined,
+        plannedExecution: undefined,
+        protectEligible: false
+      };
+      updates.push({ id: t.id, record: updated });
+      await audit(u, t.id, 'TRIAL_DISMISSED', 'v5 migration: promotional item automatically dismissed from review queue.');
+      if (t.sourceRef?.messageId) {
+        const sources = (await db.list<any>(table(u, 'gmail-sources'), { limit: 200 })).items;
+        const src = sources.find(s => s.messageId === t.sourceRef?.messageId);
+        if (src) {
+          await db.update(table(u, 'gmail-sources'), [{ id: src.id, record: { ...src, matched: false, kind: 'promotional_suppressed', processorVersion: GMAIL_PROCESSOR_VERSION } }]);
+        }
+      }
+      continue;
+    }
+    if (!t.enrollmentStatus && !t.kind) {
+      const isExplicit = /\b(your free trial has started|trial ends|subscription renews|will be charged)\b/i.test(t.plan);
+      const newStatus: EnrollmentStatus = isExplicit ? 'ACTIVE' : 'POSSIBLE';
+      const updated: Trial = {
+        ...t,
+        kind: newStatus,
+        enrollmentStatus: newStatus,
+        exposureStatus: newStatus === 'ACTIVE' && t.price > 0 ? 'CONFIRMED' : 'UNCONFIRMED',
+        safeDeadline: newStatus === 'POSSIBLE' ? undefined : t.safeDeadline,
+        plannedExecution: newStatus === 'POSSIBLE' ? undefined : t.plannedExecution,
+        protectEligible: newStatus === 'ACTIVE' && !!t.safeDeadline
+      };
+      updates.push({ id: t.id, record: updated });
+    }
+  }
+  if (updates.length) await db.update(table(u, 'trials'), updates);
+};
+const normalizeTrial=(t:Trial):Trial=>{const legacyDetected=!!t.sourceRef&&!t.authorizationAt&&!t.userConfirmedEnrollmentAt,enrollmentStatus=t.enrollmentStatus||(legacyDetected?'POSSIBLE':(t.kind||'ACTIVE')),hasDetectedChargeDate=t.hasDetectedChargeDate??(!!t.providerTrialEndDate||!!t.trialEnd),exposureStatus=t.exposureStatus||(enrollmentStatus==='ACTIVE'&&hasDetectedChargeDate&&t.price>0?'CONFIRMED':'UNCONFIRMED'),protectEligible=t.protectEligible??(enrollmentStatus==='ACTIVE'&&hasDetectedChargeDate&&!!t.safeDeadline);return{...t,...providerSupport(t.provider),enrollmentStatus,hasDetectedChargeDate,exposureStatus,protectEligible,kind:enrollmentStatus}};
+const listTrials=async(u:string)=>(await db.list<Trial>(table(u,'trials'),{limit:50})).items.map(normalizeTrial).filter(t=>!t.archivedAt&&t.enrollmentStatus!=='PROMOTIONAL'&&t.state!=='DISMISSED');
 const findTrial=async(u:string,id:string)=>{const [t]=await db.get<Trial>(table(u,'trials'),[id]);return t?normalizeTrial({...t,id}):null};
 const replace=async(u:string,id:string,t:Trial)=>{const [ok]=await db.update(table(u,'trials'),[{id,record:t}]);if(!ok)throw new Error('update failed')};
 const execute=async(userId:string,id:string)=>{const t=await findTrial(userId,id);if(!t||!['AUTO_CANCEL_ENABLED','DECISION_PENDING'].includes(t.state))return {ok:false,reason:'not_authorized'};await replace(userId,id,{...t,state:'CANCELLATION_RUNNING'});await audit(userId,id,'CANCELLATION_STARTED','Explicit authorization revalidated; no provider action was represented as complete.');const support=t.support||providerSupport(t.provider).support,guided=support==='GUIDED',next={...t,...providerSupport(t.provider),state:'CANCELLATION_NEEDS_USER' as State,nextAction:guided?'Open Canva’s official cancellation guide, complete the cancellation in the correct purchase channel, then return here. Trialvisor will require authenticated provider evidence before marking it verified.':'No reliable Trialvisor cancellation workflow currently exists for this provider. Cancel directly with the provider and retain its confirmation; Trialvisor will not claim a verified outcome.'};await replace(userId,id,next);await audit(userId,id,guided?'ASSIST_REQUIRED':'PROVIDER_ADAPTER_UNAVAILABLE',guided?'Guided Canva workflow requires the customer to act; provider evidence is required for verification.':'No reliable production cancellation workflow is enabled for this provider.');await addNotice(userId,{kind:'action_required',title:'Action required for '+t.provider,message:next.nextAction||'User participation is required before cancellation can continue.',severity:'critical',trialId:id,provider:t.provider,actionView:'overview'});await notifications.send({userIds:[userId],notification:{title:'Action required',body:guided?'Complete Canva cancellation using its official flow, then sync Gmail for provider evidence.':t.provider+' has no reliable Trialvisor cancellation workflow yet.'},data:{trialId:id,kind:'guided'}});return{ok:true,state:next.state}};
@@ -212,14 +265,14 @@ export const handler=router({
  'POST /api/billing/checkout':[requireAuth(),enforceSession({touchActivity:true}),async c=>createCheckout(c.user!.userId,c.user!.email,(c.body as {cadence?:unknown}|undefined)?.cadence)],
  'POST /api/billing/portal':[requireAuth(),enforceSession({touchActivity:true}),async c=>createPortal(c.user!.userId)],
  'GET /api/oauth/google/config':[async()=>json({configured:await googleReady(),redirectUri:GOOGLE_REDIRECT_URI,scopes:GOOGLE_SCOPES})],
- 'POST /api/oauth/google/start':[requireAuth(),enforceSession({touchActivity:true}),async c=>{if(!await googleReady())return error('Google integration is not configured',503);const nonce=randomHex(32),nonceHash=await sha256(nonce),now=Date.now();const [stateId]=await db.add('oauth-states',[{userId:c.user!.userId,provider:'google',nonceHash,createdAt:new Date(now).toISOString(),expiresAt:new Date(now+10*60*1000).toISOString()}]);if(!stateId)return error('Unable to create OAuth state',500);const clientId=await secrets.readSecret('GOOGLE_CLIENT_ID');const state=stateId+'.'+nonce;const q=new URLSearchParams({client_id:clientId,redirect_uri:GOOGLE_REDIRECT_URI,response_type:'code',scope:GOOGLE_SCOPES.join(' '),access_type:'offline',include_granted_scopes:'true',prompt:'consent',state});return json({authorizationUrl:'https://accounts.google.com/o/oauth2/v2/auth?'+q.toString(),expiresIn:600})}],
+ 'POST /api/oauth/google/start':[requireAuth(),enforceSession({touchActivity:true}),async c=>{if(!await googleReady())return error('Google integration is not configured',503);const nonce=randomHex(32),nonceHash=await sha256(nonce),now=Date.now();const [stateId]=await db.add('oauth-states',[{userId:c.user!.userId,provider:'google',nonceHash,createdAt:new Date(now).toISOString(),expiresAt:new Date(now+10*60*1000).toISOString()}]);if(!stateId)return error('Unable to create OAuth state',500);const clientId=await secrets.readSecret('GOOGLE_CLIENT_ID');const state=stateId+'.'+nonce;const q=new URLSearchParams({client_id:clientId,redirect_uri:GOOGLE_REDIRECT_URI,response_type:'code',scope:GOOGLE_SCOPES.join(' '),access_type:'offline',include_granted_scopes:'true',prompt:'select_account consent',state});return json({authorizationUrl:'https://accounts.google.com/o/oauth2/v2/auth?'+q.toString(),expiresIn:600})}],
  'GET /api/oauth/google/callback':[async c=>{const code=c.query.code,state=c.query.state,oauthError=c.query.error;if(oauthError)return redirect('https://trialvisor-m8vrsu.v2.appdeploy.ai/?oauth=google_denied');if(!code||!state||!state.includes('.'))return error('Invalid OAuth callback',400);const split=state.indexOf('.'),stateId=state.slice(0,split),nonce=state.slice(split+1);const [stored]=await db.get<OAuthState>('oauth-states',[stateId]);if(!stored||stored.provider!=='google'||stored.usedAt||stored.expiresAt<=new Date().toISOString()||stored.nonceHash!==await sha256(nonce))return error('OAuth state is invalid or expired',400);const [claimed]=await db.delete('oauth-states',[stateId]);if(!claimed)return error('OAuth state was already consumed',409);try{const clientId=await secrets.readSecret('GOOGLE_CLIENT_ID'),clientSecret=await secrets.readSecret('GOOGLE_CLIENT_SECRET');const tokenResponse=await fetch('https://oauth2.googleapis.com/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({code,client_id:clientId,client_secret:clientSecret,redirect_uri:GOOGLE_REDIRECT_URI,grant_type:'authorization_code'})});if(!tokenResponse.ok)throw new Error('Google token exchange failed '+tokenResponse.status);const tokens=await tokenResponse.json() as {access_token:string;refresh_token?:string;expires_in:number;scope?:string;token_type:string;id_token?:string};const profileResponse=await fetch('https://openidconnect.googleapis.com/v1/userinfo',{headers:{Authorization:'Bearer '+tokens.access_token}});if(!profileResponse.ok)throw new Error('Google profile lookup failed '+profileResponse.status);const profile=await profileResponse.json() as {sub:string;email?:string};const encrypted=await encryptTokens(tokens),now=new Date().toISOString();const existing=(await db.list<GoogleTokenRecord>(table(stored.userId,'google-tokens'),{limit:10})).items.find(x=>x.providerAccountIdentifier===profile.sub&&!x.revokedAt);if(existing)await db.update(table(stored.userId,'google-tokens'),[{id:existing.id,record:{...existing,...encrypted,tokenExpiration:new Date(Date.now()+tokens.expires_in*1000).toISOString(),authorizedScopes:tokens.scope||GOOGLE_SCOPES.join(' '),updatedAt:now}}]);else await db.add(table(stored.userId,'google-tokens'),[{userId:stored.userId,provider:'google',providerAccountIdentifier:profile.sub,...encrypted,tokenExpiration:new Date(Date.now()+tokens.expires_in*1000).toISOString(),authorizedScopes:tokens.scope||GOOGLE_SCOPES.join(' '),createdAt:now,updatedAt:now}]);const existingConns=(await db.list<any>(table(stored.userId,'connections'),{limit:50})).items.filter(x=>x.provider==='Google'&&x.mode==='PRODUCTION');const connRecord={provider:'Google',providerAccountIdentifier:profile.email||profile.sub,status:'CONNECTED',lastSync:now,mode:'PRODUCTION'};if(existingConns.length){await db.update(table(stored.userId,'connections'),[{id:existingConns[0].id,record:{...existingConns[0],...connRecord}}]);if(existingConns.length>1)await db.delete(table(stored.userId,'connections'),existingConns.slice(1).map(x=>x.id))}else await db.add(table(stored.userId,'connections'),[connRecord]);await audit(stored.userId,'connection','ACCOUNT_CONNECTED','Google account connected using production OAuth.');return redirect('https://trialvisor-m8vrsu.v2.appdeploy.ai/?oauth=google_connected')}catch(e){console.error('Google OAuth callback failed');await audit(stored.userId,'connection','OAUTH_FAILED','Google OAuth callback failed after state validation.');return redirect('https://trialvisor-m8vrsu.v2.appdeploy.ai/?oauth=google_failed')}}],
  'POST /api/gmail/sync':[requireAuth(),enforceSession({touchActivity:true}),async c=>{const u=c.user!.userId;const syncs=(await db.list<any>(table(u,'google-sync'),{limit:10})).items;const lastSync=syncs.map(x=>new Date(x.lastSync||0).getTime()).sort((a,b)=>b-a)[0];if(lastSync&&Date.now()-lastSync<30000){const waitSec=Math.ceil((30000-(Date.now()-lastSync))/1000);return error('Please wait '+waitSec+'s before syncing Gmail again',429)}try{return json(await syncGoogle(u))}catch(e){const u=c.user!.userId,message=e instanceof Error?e.message:'gmail_sync_failed',reconnect=message==='reconnect_required'||message==='google_not_connected';await addNotice(u,{kind:reconnect?'provider_auth_required':'sync_failure',title:reconnect?'Google reconnection required':'Gmail synchronization failed',message:reconnect?'Reconnect Google before the next inbox synchronization.':'Trialvisor could not complete the inbox synchronization. Existing findings and protection authority were not changed.',severity:reconnect?'critical':'warning',provider:'Google',actionView:'accounts'});return error(message,reconnect?409:503)}}],
  'POST /api/oauth/google/disconnect':[requireAuth(),enforceSession({touchActivity:true,sensitive:true}),async c=>{const u=c.user!.userId,tokens=(await db.list<GoogleTokenRecord>(table(u,'google-tokens'),{limit:10})).items.filter(x=>!x.revokedAt),now=new Date().toISOString();for(const x of tokens){try{const plain=await decryptTokens(x.ciphertext,x.iv),token=plain.refresh_token||plain.access_token;if(token){await audit(u,'connection','GOOGLE_REMOTE_REVOCATION_ATTEMPTED','Google token revocation request initiated.');await fetch('https://oauth2.googleapis.com/revoke',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({token})})}}catch(e){console.warn('Google remote revocation failed; local token will still be destroyed')}}if(tokens.length)await db.update(table(u,'google-tokens'),tokens.map(x=>({id:x.id,record:{...x,revokedAt:now,updatedAt:now,ciphertext:'',iv:''}})));const conns=(await db.list<any>(table(u,'connections'),{limit:50})).items.filter(x=>x.provider==='Google'&&x.mode==='PRODUCTION');if(conns.length)await db.update(table(u,'connections'),conns.map(x=>({id:x.id,record:{...x,status:'DISCONNECTED',lastSync:x.lastSync||now}})));await audit(u,'connection','ACCOUNT_DISCONNECTED','Google token material deleted and connection revoked locally.');await addNotice(u,{kind:'account_disconnected',title:'Google disconnected',message:'Local encrypted OAuth token material was destroyed. Existing Trialvisor findings and audit records were retained.',severity:'info',provider:'Google',actionView:'accounts'});return json({ok:true,reauthorizeWith:'/api/oauth/google/start'})}],
  'GET /api/integrations/google/diagnostics':[requireAuth(),enforceSession(),async c=>json(await integrationDiagnostics(c.user!.userId))],
  'POST /api/account/onboarding-complete':[requireAuth(),enforceSession({touchActivity:true}),async c=>{const u=c.user!.userId;await ensureAccount(u);const records=(await db.list<any>(table(u,'account'),{limit:20})).items,now=new Date().toISOString();await db.update(table(u,'account'),records.map(a=>({id:a.id,record:{...a,lifecycleVersion:3,onboardingComplete:true,onboardingCompletedAt:now}})));return json({ok:true})}],
  'POST /api/account/onboarding-restart':[requireAuth(),enforceSession({touchActivity:true}),async c=>{const u=c.user!.userId;await ensureAccount(u);const records=(await db.list<any>(table(u,'account'),{limit:20})).items;await db.update(table(u,'account'),records.map(a=>({id:a.id,record:{...a,lifecycleVersion:3,onboardingComplete:false,onboardingCompletedAt:undefined}})));return json({ok:true})}],
- 'GET /api/dashboard':[requireAuth(),enforceSession(),async c=>{const u=c.user!.userId,account=await ensureAccount(u),trials=await listTrials(u),audits=(await db.list<any>(table(u,'audit'),{limit:100})).items,connections=(await db.list(table(u,'connections'),{limit:50})).items,sources=(await db.list<any>(table(u,'gmail-sources'),{limit:500})).items,sync=(await db.list<any>(table(u,'google-sync'),{limit:10})).items,billing=await billingSnapshot(u),matched=sources.filter(x=>x.matched).length,latestSync=sync.filter(x=>x.lastSync).sort((a,b)=>b.lastSync.localeCompare(a.lastSync))[0],notices=(await db.list<PersistentNotice>(table(u,'notifications'),{limit:100})).items.sort((a,b)=>b.at.localeCompare(a.at)),activity=audits.sort((a,b)=>b.at.localeCompare(a.at)).map(customerActivity),trialsWithActivity=trials.map(t=>({...t,activity:activity.filter(a=>a.trialId===t.id)})),exposure=exposureSummary(trials);return json({user:{name:c.user!.name,email:c.user!.email},account:{initialized:true,onboardingComplete:!!account.onboardingComplete,guidanceShown:Array.isArray(account.guidanceShown)?account.guidanceShown:[]},trials:trialsWithActivity,exposure,saved:trials.filter(t=>t.state==='CANCELED_CONFIRMED').reduce((s,t)=>s+t.price,0),events:audits.length,activity,notifications:notices,connections,billing,config:await config(),gmailDiscovery:{processedReferences:sources.length,matchedReferences:matched,promotionalReferences:sources.filter(x=>x.classification==='PROMOTIONAL').length,lastSync:latestSync?.lastSync||null,lastResult:latestSync?.lastResult||null,verified:trials.some(t=>t.enrollmentStatus==='ACTIVE'&&!!t.sourceRef&&sources.some(s=>s.matched&&s.classification==='ACTIVE'&&s.messageId===t.sourceRef?.messageId))}})}],
+ 'GET /api/dashboard':[requireAuth(),enforceSession(),async c=>{const u=c.user!.userId;await reprocessV4Findings(u);const account=await ensureAccount(u),trials=await listTrials(u),audits=(await db.list<any>(table(u,'audit'),{limit:100})).items,connections=(await db.list(table(u,'connections'),{limit:50})).items,sources=(await db.list<any>(table(u,'gmail-sources'),{limit:500})).items,sync=(await db.list<any>(table(u,'google-sync'),{limit:10})).items,billing=await billingSnapshot(u),matched=sources.filter(x=>x.matched).length,latestSync=sync.filter(x=>x.lastSync).sort((a,b)=>b.lastSync.localeCompare(a.lastSync))[0],notices=(await db.list<PersistentNotice>(table(u,'notifications'),{limit:100})).items.sort((a,b)=>b.at.localeCompare(a.at)),activity=audits.sort((a,b)=>b.at.localeCompare(a.at)).map(customerActivity),trialsWithActivity=trials.map(t=>({...t,activity:activity.filter(a=>a.trialId===t.id)})),exposure=exposureSummary(trials);return json({user:{name:c.user!.name,email:c.user!.email},account:{initialized:true,onboardingComplete:!!account.onboardingComplete,guidanceShown:Array.isArray(account.guidanceShown)?account.guidanceShown:[]},trials:trialsWithActivity,exposure,saved:trials.filter(t=>t.state==='CANCELED_CONFIRMED').reduce((s,t)=>s+t.price,0),events:audits.length,activity,notifications:notices,connections,billing,config:await config(),gmailDiscovery:{processedReferences:sources.length,matchedReferences:matched,promotionalReferences:sources.filter(x=>x.classification==='PROMOTIONAL').length,lastSync:latestSync?.lastSync||null,lastResult:latestSync?.lastResult||null,verified:trials.some(t=>t.enrollmentStatus==='ACTIVE'&&!!t.sourceRef&&sources.some(s=>s.matched&&s.classification==='ACTIVE'&&s.messageId===t.sourceRef?.messageId))}})}],
  'POST /api/guidance/:key/seen':[requireAuth(),enforceSession({touchActivity:true}),async c=>{const u=c.user!.userId,key=c.params.key,allowed=new Set(['FIRST_AUTHENTICATED_VISIT','FIRST_ACCOUNT_CONNECTED','FIRST_SUCCESSFUL_INBOX_SYNC','FIRST_TRIAL_DETECTED','FIRST_PROTECT_AUTHORIZATION','FIRST_VERIFIED_CANCELLATION']);if(!allowed.has(key))return error('Unknown guidance key',400);await ensureAccount(u);const records=(await db.list<any>(table(u,'account'),{limit:20})).items;await db.update(table(u,'account'),records.map(a=>({id:a.id,record:{...a,guidanceShown:Array.from(new Set([...(Array.isArray(a.guidanceShown)?a.guidanceShown:[]),key]))}})));return json({ok:true})}],
  'POST /api/trials/manual':[requireAuth(),enforceSession({touchActivity:true}),async c=>{const u=c.user!.userId,b=(c.body||{}) as {provider?:string;plan?:string;price?:number;trialEnd?:string},provider=(b.provider||'').trim(),rawEnd=b.trialEnd||'',end=new Date(rawEnd);if(!provider||Number.isNaN(end.getTime()))return error('Provider and valid trial end are required',400);if(end.getTime()<=Date.now())return error('Trial end date must be in the future',400);const providerTrialEndDate=rawEnd.match(/^\d{4}-\d{2}-\d{2}$/)?rawEnd:undefined;const deadline=new Date(end.getTime()-48*3600000),run=new Date(deadline.getTime()-3600000),price=Math.max(0,Number(b.price)||0),now=new Date().toISOString(),[id]=await db.add(table(u,'trials'),[{userId:u,provider,plan:(b.plan||'Trial').trim()||'Trial',price,currency:'USD',billingCadence:'unknown',trialEnd:end.toISOString(),safeDeadline:deadline.toISOString(),plannedExecution:run.toISOString(),providerTrialEndDate,hasExplicitTime:false,hasDetectedChargeDate:true,state:'REVIEW_REQUIRED',...providerSupport(provider),confidence:1,confidenceBand:'HIGH',enrollmentStatus:'ACTIVE',exposureStatus:price>0?'CONFIRMED':'UNCONFIRMED',protectEligible:true,userConfirmedEnrollmentAt:now,classificationReason:'User manually confirmed this trial or subscription.'}]);if(!id)return error('Unable to create trial',500);await audit(u,id,'TRIAL_CREATED','Manual trial added for review.');await addNotice(u,{kind:'review_needed',title:provider+' needs review',message:'A manual trial was added. Nothing is protected until you explicitly choose Protect.',severity:'warning',trialId:id,provider,actionView:'overview'});return json({ok:true,id})}],
  'POST /api/notifications/read-all':[requireAuth(),enforceSession({touchActivity:true}),async c=>{const u=c.user!.userId,records=(await db.list<PersistentNotice>(table(u,'notifications'),{limit:100})).items.filter(x=>!x.readAt),readAt=new Date().toISOString();if(records.length)await db.update(table(u,'notifications'),records.map(x=>({id:x.id,record:{...x,readAt}})));return json({ok:true,updated:records.length})}],
@@ -229,8 +282,143 @@ export const handler=router({
  'GET /api/account/export':[requireAuth(),enforceSession(),async c=>{const u=c.user!.userId,names=['account','trials','audit','connections','gmail-sources','google-sync','notifications','feedback','billing'],pages=await Promise.all(names.map(n=>db.list(table(u,n),{limit:n==='gmail-sources'?500:100})));return json({exportedAt:new Date().toISOString(),scope:'Tenant-scoped Trialvisor application records. OAuth token material and secrets are excluded.',data:Object.fromEntries(names.map((n,i)=>[n,pages[i].items]))})}],
  'POST /api/account/delete':[requireAuth(),enforceSession({touchActivity:true,sensitive:true}),async c=>{const u=c.user!.userId,b=(c.body||{}) as {confirm?:string};if(b.confirm!=='DELETE')return error('Explicit deletion confirmation is required',400);const billing=await currentBilling(u);if(billing&&billing.subscriptionId&&ACTIVE_STATUSES.has(billing.status)&&!billing.cancelAtPeriodEnd)return error('Active Stripe subscription must be canceled in the billing portal before deleting your account',409);const bindingTable=billing?.customerId?'stripe-customer-binding:'+billing.customerId:null;if(bindingTable){const bindings=(await db.list<any>(bindingTable,{limit:10})).items;if(bindings.some(x=>x.userId!==u))return error('Stripe customer ownership could not be verified for deletion',409)}const tokens=(await db.list<GoogleTokenRecord>(table(u,'google-tokens'),{limit:10})).items.filter(x=>!x.revokedAt&&x.ciphertext);for(const x of tokens){try{const plain=await decryptTokens(x.ciphertext,x.iv),token=plain.refresh_token||plain.access_token;if(token)await fetch('https://oauth2.googleapis.com/revoke',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({token})})}catch{console.warn('Provider revocation failed during account deletion; local data deletion continued')}}const jobs=await listAllJobs(x=>x.userId===u);if(jobs.length)await db.delete('jobs',jobs.map(x=>x.id));for(const n of ['sessions','google-tokens','google-sync','gmail-sources','connections','trials','audit','notifications','feedback','billing','account'])await deleteAllRecords(table(u,n));if(bindingTable)await deleteAllRecords(bindingTable);return json({ok:true,deleted:'trialvisor_tenant_data',authenticationIdentityDeleted:false})}],
  'POST /api/connections/demo':[requireAuth(),enforceSession({touchActivity:true}),async c=>{const u=c.user!.userId,b=(c.body||{}) as {provider?:string};if(!['Google','Microsoft'].includes(b.provider||''))return error('Unsupported provider',400);const now=new Date(),end=new Date(now.getTime()+6*86400000),deadline=new Date(end.getTime()-48*3600000),run=new Date(deadline.getTime()-3600000);const existing=(await db.list<Trial>(table(u,'trials'),{limit:50})).items.find(t=>t.provider===(b.provider==='Google'?'Canva':'Notion'));if(!existing){const provider=b.provider==='Google'?'Canva':'Notion';const [id]=await db.add(table(u,'trials'),[{userId:u,provider,plan:'Pro trial',price:provider==='Canva'?14.99:12,currency:'USD',billingCadence:'monthly',trialEnd:end.toISOString(),safeDeadline:deadline.toISOString(),plannedExecution:run.toISOString(),providerTrialEndDate:end.toISOString().split('T')[0],hasExplicitTime:false,hasDetectedChargeDate:true,state:'REVIEW_REQUIRED',...providerSupport(provider),confidence:.94,confidenceBand:'HIGH',enrollmentStatus:'ACTIVE',exposureStatus:'CONFIRMED',protectEligible:true,classificationReason:'Synthetic demonstration enrollment evidence.'}]);if(id)await audit(u,id,'TRIAL_DETECTED','Demo inbox signal classified with high confidence.')}await db.add(table(u,'connections'),[{provider:b.provider,status:'CONNECTED',lastSync:new Date().toISOString(),mode:'DEMO'}]);await audit(u,'connection','ACCOUNT_CONNECTED',b.provider+' demo inbox connected.');return json({ok:true})}],
- 'POST /api/trials/:id/confirm-enrollment':[requireAuth(),enforceSession({touchActivity:true}),async c=>{const u=c.user!.userId,t=await findTrial(u,c.params.id);if(!t||t.state!=='REVIEW_REQUIRED'||t.enrollmentStatus!=='POSSIBLE'||t.archivedAt)return error('This finding cannot be confirmed',409);if(!t.hasDetectedChargeDate||new Date(t.trialEnd).getTime()<=Date.now())return error('Add a valid future billing or trial-end date before confirming this finding',409);const at=new Date().toISOString(),next={...t,enrollmentStatus:'ACTIVE' as const,exposureStatus:t.price>0?'CONFIRMED' as const:'UNCONFIRMED' as const,protectEligible:true,userConfirmedEnrollmentAt:at,confidence:1,confidenceBand:'HIGH' as const,classificationReason:'User confirmed this finding belongs to an active trial or subscription.'};await replace(u,c.params.id,next);await audit(u,c.params.id,'ENROLLMENT_CONFIRMED','User confirmed that the Review Required finding is an active trial or subscription. This did not authorize cancellation.');return json({ok:true})}],
- 'POST /api/trials/:id/protect':[requireAuth(),enforceSession({touchActivity:true}),async c=>{const u=c.user!.userId;if(!await hasProEntitlement(u))return error('Trialvisor Pro is required to protect a new trial',402);const t=await findTrial(u,c.params.id);if(!t||t.state!=='REVIEW_REQUIRED')return error('Trial is not eligible',409);if(t.enrollmentStatus!=='ACTIVE'||!t.protectEligible||!t.hasDetectedChargeDate)return error('Confirm active enrollment and a valid future charge date before using Protect',409);const jobs=await listAllJobs(j=>j.userId===u&&j.trialId===c.params.id&&j.status==='PENDING');if(jobs.length)return error('Protection is already scheduled',409);const authorizedAt=new Date().toISOString(),next={...t,state:'AUTO_CANCEL_ENABLED' as State,authorizationAt:authorizedAt};await replace(u,c.params.id,next);await db.add('jobs',[{userId:u,trialId:c.params.id,kind:'DECISION',dueAt:new Date(new Date(t.plannedExecution).getTime()-24*3600000).toISOString(),status:'PENDING',attempts:0,idempotencyKey:'decision:'+c.params.id},{userId:u,trialId:c.params.id,kind:'CANCEL',dueAt:t.plannedExecution,status:'PENDING',attempts:0,idempotencyKey:'cancel:'+c.params.id}]);await audit(u,c.params.id,'AUTHORIZATION_GRANTED','Auto Cancel explicitly authorized for this subscription.');await addNotice(u,{kind:'protection_enabled',title:'Protection enabled for '+t.provider,message:'Trialvisor will monitor the Safe Cancel Deadline. Cancellation authority applies only to this protected item.',severity:'success',trialId:c.params.id,provider:t.provider,actionView:'overview'});return json({ok:true})}],
+  'POST /api/trials/:id/confirm': [requireAuth(), enforceSession({ touchActivity: true }), async c => {
+    const u = c.user!.userId, t = await findTrial(u, c.params.id);
+    if (!t || t.state !== 'REVIEW_REQUIRED') return error('Trial is not eligible for confirmation', 409);
+    const b = (c.body || {}) as { price?: number; trialEnd?: string; plan?: string };
+    const price = typeof b.price === 'number' ? Math.max(0, b.price) : t.price;
+    const trialEnd = b.trialEnd || t.trialEnd;
+    const plan = (b.plan || t.plan).trim();
+    let safeDeadline = t.safeDeadline, plannedExecution = t.plannedExecution, providerTrialEndDate = t.providerTrialEndDate;
+    if (trialEnd) {
+      const end = new Date(trialEnd);
+      if (!isNaN(end.getTime())) {
+        const deadline = new Date(end.getTime() - 48 * 3600000), run = new Date(deadline.getTime() - 3600000);
+        safeDeadline = deadline.toISOString();
+        plannedExecution = run.toISOString();
+        if (/^\d{4}-\d{2}-\d{2}$/.test(trialEnd)) providerTrialEndDate = trialEnd;
+      }
+    }
+    const at = new Date().toISOString();
+    const updated: Trial = {
+      ...t,
+      kind: 'ACTIVE',
+      enrollmentStatus: 'ACTIVE',
+      exposureStatus: price > 0 ? 'CONFIRMED' : 'UNCONFIRMED',
+      protectEligible: !!trialEnd && !!safeDeadline,
+      userConfirmedEnrollmentAt: at,
+      plan,
+      price,
+      trialEnd,
+      safeDeadline,
+      plannedExecution,
+      providerTrialEndDate,
+      hasDetectedChargeDate: !!trialEnd,
+      confidence: 1,
+      confidenceBand: 'HIGH',
+      classificationReason: 'User confirmed subscription finding: ' + plan + '.'
+    };
+    await replace(u, c.params.id, updated);
+    await audit(u, c.params.id, 'TRIAL_CONFIRMED', 'User confirmed subscription finding: ' + plan + '.');
+    return json({ ok: true, trial: updated });
+  }],
+  'POST /api/trials/:id/confirm-enrollment': [requireAuth(), enforceSession({ touchActivity: true }), async c => {
+    const u = c.user!.userId, t = await findTrial(u, c.params.id);
+    if (!t || t.state !== 'REVIEW_REQUIRED') return error('This finding cannot be confirmed', 409);
+    const b = (c.body || {}) as { price?: number; trialEnd?: string; plan?: string };
+    const price = typeof b.price === 'number' ? Math.max(0, b.price) : t.price;
+    const trialEnd = b.trialEnd || t.trialEnd;
+    const plan = (b.plan || t.plan).trim();
+    let safeDeadline = t.safeDeadline, plannedExecution = t.plannedExecution, providerTrialEndDate = t.providerTrialEndDate;
+    if (trialEnd) {
+      const end = new Date(trialEnd);
+      if (!isNaN(end.getTime())) {
+        const deadline = new Date(end.getTime() - 48 * 3600000), run = new Date(deadline.getTime() - 3600000);
+        safeDeadline = deadline.toISOString();
+        plannedExecution = run.toISOString();
+        if (/^\d{4}-\d{2}-\d{2}$/.test(trialEnd)) providerTrialEndDate = trialEnd;
+      }
+    }
+    const at = new Date().toISOString();
+    const updated: Trial = {
+      ...t,
+      kind: 'ACTIVE',
+      enrollmentStatus: 'ACTIVE',
+      exposureStatus: price > 0 ? 'CONFIRMED' : 'UNCONFIRMED',
+      protectEligible: !!trialEnd && !!safeDeadline,
+      userConfirmedEnrollmentAt: at,
+      plan,
+      price,
+      trialEnd,
+      safeDeadline,
+      plannedExecution,
+      providerTrialEndDate,
+      hasDetectedChargeDate: !!trialEnd,
+      confidence: 1,
+      confidenceBand: 'HIGH',
+      classificationReason: 'User confirmed subscription finding: ' + plan + '.'
+    };
+    await replace(u, c.params.id, updated);
+    await audit(u, c.params.id, 'ENROLLMENT_CONFIRMED', 'User confirmed that the Review Required finding is an active trial or subscription. This did not authorize cancellation.');
+    return json({ ok: true, trial: updated });
+  }],
+  'POST /api/trials/:id/dismiss': [requireAuth(), enforceSession({ touchActivity: true }), async c => {
+    const u = c.user!.userId, t = await findTrial(u, c.params.id);
+    if (!t) return error('Trial not found', 404);
+    if (t.state !== 'REVIEW_REQUIRED') return error('Only uncommitted review items can be dismissed', 409);
+    const b = (c.body || {}) as { reason?: string };
+    const reason = (b.reason || 'not_a_subscription').slice(0, 100);
+    const now = new Date().toISOString();
+    const isOfferOnly = reason === 'offer_only';
+    const updated: Trial = {
+      ...t,
+      state: 'DISMISSED',
+      dismissedAt: now,
+      dismissReason: reason,
+      kind: isOfferOnly ? 'PROMOTIONAL' : t.kind,
+      enrollmentStatus: isOfferOnly ? 'PROMOTIONAL' : t.enrollmentStatus,
+      exposureStatus: 'EXCLUDED',
+      price: isOfferOnly ? 0 : t.price,
+      trialEnd: isOfferOnly ? undefined : t.trialEnd,
+      providerTrialEndDate: isOfferOnly ? undefined : t.providerTrialEndDate,
+      hasExplicitTime: isOfferOnly ? false : t.hasExplicitTime,
+      safeDeadline: undefined,
+      plannedExecution: undefined,
+      protectEligible: false
+    };
+    await replace(u, c.params.id, updated);
+    if (t.sourceRef?.messageId) {
+      const sources = (await db.list<any>(table(u, 'gmail-sources'), { limit: 200 })).items;
+      const src = sources.find(s => s.messageId === t.sourceRef?.messageId);
+      if (src) {
+        await db.update(table(u, 'gmail-sources'), [{ id: src.id, record: { ...src, matched: false, kind: 'user_dismissed', processorVersion: GMAIL_PROCESSOR_VERSION } }]);
+      }
+    }
+    await audit(u, c.params.id, 'TRIAL_DISMISSED', 'Finding dismissed by user (' + reason + '). Will not recur.');
+    return json({ ok: true });
+  }],
+  'POST /api/trials/:id/protect': [requireAuth(), enforceSession({ touchActivity: true }), async c => {
+    const u = c.user!.userId;
+    if (!await hasProEntitlement(u)) return error('Trialvisor Pro is required to protect a new trial', 402);
+    const t = await findTrial(u, c.params.id);
+    if (!t || t.state !== 'REVIEW_REQUIRED' || t.enrollmentStatus === 'PROMOTIONAL' || t.enrollmentStatus === 'POSSIBLE' || t.kind === 'PROMOTIONAL' || t.kind === 'POSSIBLE') {
+      return error('Trial is not eligible', 409);
+    }
+    if (!t.safeDeadline || !t.plannedExecution || !t.trialEnd) {
+      return error('Confirmed trial end date is required before protection can be scheduled', 400);
+    }
+    const jobs = await listAllJobs(j => j.userId === u && j.trialId === c.params.id && j.status === 'PENDING');
+    if (jobs.length) return error('Protection is already scheduled', 409);
+    const authorizedAt = new Date().toISOString(), next = { ...t, state: 'AUTO_CANCEL_ENABLED' as State, authorizationAt: authorizedAt };
+    await replace(u, c.params.id, next);
+    await db.add('jobs', [
+      { userId: u, trialId: c.params.id, kind: 'DECISION', dueAt: new Date(new Date(t.plannedExecution).getTime() - 24 * 3600000).toISOString(), status: 'PENDING', attempts: 0, idempotencyKey: 'decision:' + c.params.id },
+      { userId: u, trialId: c.params.id, kind: 'CANCEL', dueAt: t.plannedExecution, status: 'PENDING', attempts: 0, idempotencyKey: 'cancel:' + c.params.id }
+    ]);
+    await audit(u, c.params.id, 'AUTHORIZATION_GRANTED', 'Auto Cancel explicitly authorized for this subscription.');
+    await addNotice(u, { kind: 'protection_enabled', title: 'Protection enabled for ' + t.provider, message: 'Trialvisor will monitor the Safe Cancel Deadline. Cancellation authority applies only to this protected item.', severity: 'success', trialId: c.params.id, provider: t.provider, actionView: 'overview' });
+    return json({ ok: true });
+  }],
  'POST /api/trials/:id/keep':[requireAuth(),enforceSession({touchActivity:true}),async c=>{const u=c.user!.userId,t=await findTrial(u,c.params.id);if(!t||!['AUTO_CANCEL_ENABLED','DECISION_PENDING','CANCELLATION_NEEDS_USER'].includes(t.state))return error('No revocable cancellation',409);await replace(u,c.params.id,{...t,state:'KEEP_REQUESTED',nextAction:undefined});const jobs=await listAllJobs(j=>j.userId===u&&j.trialId===c.params.id&&j.status==='PENDING');if(jobs.length)await db.delete('jobs',jobs.map(j=>j.id));await audit(u,c.params.id,'KEEP_SELECTED','Scheduled cancellation revoked.');await addNotice(u,{kind:'keep_selected',title:t.provider+' will be kept',message:'The scheduled Trialvisor cancellation was revoked and the decision was recorded.',severity:'info',trialId:c.params.id,provider:t.provider,actionView:'overview'});return json({ok:true})}],
  'POST /api/trials/:id/cancel-selected':[requireAuth(),enforceSession({touchActivity:true}),async c=>{const u=c.user!.userId,t=await findTrial(u,c.params.id);if(!t||!['AUTO_CANCEL_ENABLED','DECISION_PENDING'].includes(t.state))return error('No active protection authorization',409);if(t.state==='AUTO_CANCEL_ENABLED')await replace(u,c.params.id,{...t,state:'DECISION_PENDING'});await audit(u,c.params.id,'CANCEL_SELECTED','User confirmed cancellation should proceed under the existing authorization and schedule.');await addNotice(u,{kind:'cancellation_scheduled',title:'Cancellation remains scheduled',message:t.provider+' will proceed at the planned time under your existing authorization unless you choose Keep.',severity:'warning',trialId:c.params.id,provider:t.provider,actionView:'overview'});return json({ok:true})}],
  'POST /api/trials/:id/provider-step-complete':[requireAuth(),enforceSession({touchActivity:true}),async c=>{const u=c.user!.userId,t=await findTrial(u,c.params.id);if(!t||t.state!=='CANCELLATION_NEEDS_USER')return error('Guided provider step is not available',409);const isCanva=/\bcanva\b/i.test(t.provider);const at=new Date().toISOString(),next={...t,...providerSupport(t.provider),providerActionAt:at,nextAction:isCanva?'Waiting for an authenticated Canva cancellation confirmation. Sync the connected Gmail inbox; a self-report alone never marks cancellation verified.':'Customer reported completing cancellation directly with provider. Trialvisor does not mark this verified without independent provider evidence.'};await replace(u,c.params.id,next);await audit(u,c.params.id,'PROVIDER_STEP_REPORTED',isCanva?'Customer reported completing the provider steps; cancellation remains unverified pending authenticated provider evidence.':'Customer reported completing provider cancellation directly. Outcome remains unverified.');await addNotice(u,{kind:'verification_pending',title:t.provider+' steps reported',message:isCanva?'Sync the connected Gmail inbox after the provider confirmation arrives. Trialvisor will not treat this report as proof.':'Cancellation was reported by user. Trialvisor will not claim a verified outcome without independent provider evidence.',severity:'warning',trialId:c.params.id,provider:t.provider,actionView:isCanva?'accounts':'overview'});return json({ok:true,verified:false})}],

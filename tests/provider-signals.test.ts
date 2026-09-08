@@ -1,6 +1,7 @@
+import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { canvaCancellationEvidence, classifyMessage, classifySignal, exposureSummary, extractProvider, formatCalendarDate, mergeSourceReferences, nextHistoryCheckpoint, sameSubscriptionEntity, type GmailMessage } from '../backend/provider-signals.ts';
+import { canvaCancellationEvidence, classifyMessage, classifySignal, exposureSummary, extractProvider, formatCalendarDate, mergeSourceReferences, nextHistoryCheckpoint, sameSubscriptionEntity, isPromotionalContent, extractRecurringPrice, extractDateSignal, type GmailMessage } from '../backend/provider-signals.ts';
 
 const encoded=(value:string)=>Buffer.from(value).toString('base64url');
 const message=(subject:string,body:string,from:string,authenticationResults?:string):GmailMessage=>({
@@ -252,4 +253,268 @@ test('does not advance Gmail history while candidate retrieval needs retry',()=>
   assert.equal(nextHistoryCheckpoint('new-history','old-history',1),'old-history');
   assert.equal(nextHistoryCheckpoint('new-history',undefined,1),'');
   assert.equal(nextHistoryCheckpoint('new-history','old-history',0),'new-history');
+});
+
+test('F1. PROMOTIONAL: Honey price drops droplist alert', () => {
+  const res = classifySignal(message(
+    'We found price drops for an item you Droplisted',
+    'An item you saved on your Droplist dropped in price by $15. Check out the deal before it expires.',
+    'droplist@joinhoney.com'
+  ));
+  assert.ok(res);
+  assert.equal(res.kind, 'PROMOTIONAL');
+  assert.equal(res.price, 0);
+  assert.equal(res.providerTrialEndDate, undefined);
+  assert.equal(res.trialEnd, undefined);
+  assert.equal(res.safeDeadline, undefined);
+  assert.equal(res.plannedExecution, undefined);
+});
+
+test('F2. PROMOTIONAL: Xfinity Samsung S25+ ON US hardware deal', () => {
+  const res = classifySignal(message(
+    'Available now! Samsung S25+ ON US',
+    'Get the new Samsung S25+ on us when you add a line. Limited time offer.',
+    'online.communications@alerts.comcast.net'
+  ));
+  assert.ok(res);
+  assert.equal(res.kind, 'PROMOTIONAL');
+  assert.equal(res.price, 0);
+  assert.equal(res.providerTrialEndDate, undefined);
+  assert.equal(res.trialEnd, undefined);
+  assert.equal(res.safeDeadline, undefined);
+  assert.equal(res.plannedExecution, undefined);
+});
+
+test('F3. PROMOTIONAL: Xfinity FREE 5G phone + up to $500 switch offer', () => {
+  const res = classifySignal(message(
+    'Get a FREE 5G phone + up to $500 when you switch',
+    'Switch to Xfinity Mobile today! Get a free 5G phone and a $500 Visa prepaid card. Offer ends October 15, 2026.',
+    'online.communications@alerts.comcast.net'
+  ));
+  assert.ok(res);
+  assert.equal(res.kind, 'PROMOTIONAL');
+  assert.equal(res.price, 0);
+  assert.equal(res.providerTrialEndDate, undefined);
+  assert.equal(res.trialEnd, undefined);
+  assert.equal(res.safeDeadline, undefined);
+  assert.equal(res.plannedExecution, undefined);
+});
+
+test('F4. PROMOTIONAL: Xfinity up to $1,000 off select 5G phones', () => {
+  const res = classifySignal(message(
+    'Just for you: Up to $1,000 off select 5G phones',
+    'Upgrade your phone! Trade in your old device and get up to $1,000 off select 5G phones.',
+    'online.communications@alerts.comcast.net'
+  ));
+  assert.ok(res);
+  assert.equal(res.kind, 'PROMOTIONAL');
+  assert.equal(res.price, 0);
+  assert.equal(res.providerTrialEndDate, undefined);
+  assert.equal(res.trialEnd, undefined);
+  assert.equal(res.safeDeadline, undefined);
+  assert.equal(res.plannedExecution, undefined);
+});
+
+test('F5. PROMOTIONAL: Start your free trial CTA invitation', () => {
+  const res = classifySignal(message(
+    'Start your free trial',
+    'Try Pro free for 30 days. Explore all our advanced features today. Claim your trial!',
+    'marketing@creativetools.io'
+  ));
+  assert.ok(res);
+  assert.equal(res.kind, 'PROMOTIONAL');
+  assert.equal(res.price, 0);
+  assert.equal(res.providerTrialEndDate, undefined);
+  assert.equal(res.trialEnd, undefined);
+  assert.equal(res.safeDeadline, undefined);
+  assert.equal(res.plannedExecution, undefined);
+});
+
+test('F6. PROMOTIONAL: Get 3 months free marketing offer', () => {
+  const res = classifySignal(message(
+    'Get 3 months free',
+    'Special summer invitation: get 3 months free on annual plans when you sign up today.',
+    'offers@musicservice.com'
+  ));
+  assert.ok(res);
+  assert.equal(res.kind, 'PROMOTIONAL');
+  assert.equal(res.price, 0);
+  assert.equal(res.providerTrialEndDate, undefined);
+  assert.equal(res.trialEnd, undefined);
+  assert.equal(res.safeDeadline, undefined);
+  assert.equal(res.plannedExecution, undefined);
+});
+
+test('F7. PROMOTIONAL: Generic upgrade offer', () => {
+  const res = classifySignal(message(
+    'Exclusive upgrade offer for your account',
+    'Upgrade offer: switch to our premium device tier and receive $200 in billing credit.',
+    'updates@devicecarrier.net'
+  ));
+  assert.ok(res);
+  assert.equal(res.kind, 'PROMOTIONAL');
+  assert.equal(res.price, 0);
+  assert.equal(res.providerTrialEndDate, undefined);
+  assert.equal(res.trialEnd, undefined);
+  assert.equal(res.safeDeadline, undefined);
+  assert.equal(res.plannedExecution, undefined);
+});
+
+test('F8. PROMOTIONAL: Retention offer', () => {
+  const res = classifySignal(message(
+    'Special retention offer just for you',
+    'Retention offer: stay with our service and get a $100 gift card on your next invoice.',
+    'retention@broadbandservice.com'
+  ));
+  assert.ok(res);
+  assert.equal(res.kind, 'PROMOTIONAL');
+  assert.equal(res.price, 0);
+  assert.equal(res.providerTrialEndDate, undefined);
+  assert.equal(res.trialEnd, undefined);
+  assert.equal(res.safeDeadline, undefined);
+  assert.equal(res.plannedExecution, undefined);
+});
+
+test('F9. PROMOTIONAL: Bundle offer', () => {
+  const res = classifySignal(message(
+    'Exclusive bundle offer available now',
+    'Bundle offer: combine your home internet and mobile plans to save up to $400 a year.',
+    'sales@telecomgroup.com'
+  ));
+  assert.ok(res);
+  assert.equal(res.kind, 'PROMOTIONAL');
+  assert.equal(res.price, 0);
+  assert.equal(res.providerTrialEndDate, undefined);
+  assert.equal(res.trialEnd, undefined);
+  assert.equal(res.safeDeadline, undefined);
+  assert.equal(res.plannedExecution, undefined);
+});
+
+test('F10. PROMOTIONAL: Hardware promotion', () => {
+  const res = classifySignal(message(
+    'Special hardware promotion: 50% off select tablets',
+    'Hardware promotion: buy one tablet and get one free with any qualifying 2-year service agreement.',
+    'promotions@techhardware.com'
+  ));
+  assert.ok(res);
+  assert.equal(res.kind, 'PROMOTIONAL');
+  assert.equal(res.price, 0);
+  assert.equal(res.providerTrialEndDate, undefined);
+  assert.equal(res.trialEnd, undefined);
+  assert.equal(res.safeDeadline, undefined);
+  assert.equal(res.plannedExecution, undefined);
+});
+
+test('F11. PROMOTIONAL: Generic marketing message', () => {
+  const res = classifySignal(message(
+    'Summer deals are here: Save big on gear',
+    'Check out our summer clearance sale with huge discounts on all accessories. Use promo code SUMMER20.',
+    'deals@retailmerchant.com'
+  ));
+  assert.ok(res);
+  assert.equal(res.kind, 'PROMOTIONAL');
+  assert.equal(res.price, 0);
+  assert.equal(res.providerTrialEndDate, undefined);
+  assert.equal(res.trialEnd, undefined);
+  assert.equal(res.safeDeadline, undefined);
+  assert.equal(res.plannedExecution, undefined);
+});
+
+test('G. CONTEXTUAL RECURRING PRICE EXTRACTION: thousands separator bug fixed, marketing credits ignored', () => {
+  // $14.99/month
+  assert.equal(extractRecurringPrice('You will be charged $14.99/month after trial'), 14.99);
+  assert.equal(extractRecurringPrice('Renews at $29.99 per month'), 29.99);
+  assert.equal(extractRecurringPrice('Upcoming charge of $99 / year'), 99);
+  assert.equal(extractRecurringPrice('$49.99 monthly subscription fee'), 49.99);
+
+  // $1,000 credit or phone discount must NOT be parsed as $1.00
+  assert.equal(extractRecurringPrice('Get up to $1,000 credit towards your trade-in phone'), 0);
+  assert.equal(extractRecurringPrice('Save up to $800 on your next device'), 0);
+  assert.equal(extractRecurringPrice('Receive a $500 Visa prepaid card when you switch'), 0);
+  assert.equal(extractRecurringPrice('$50 off your purchase of $150 or more'), 0);
+});
+
+test('H. CONTEXTUAL TRIAL/RENEWAL DATE EXTRACTION: marketing dates ignored, renewal dates captured', () => {
+  const received = new Date('2026-09-01T12:00:00Z');
+
+  // Valid renewal context
+  const validSignal = extractDateSignal(
+    'Your free trial has started. Your trial ends September 10, 2026. You will be charged $14.99/month after your trial.',
+    received,
+    true
+  );
+  assert.equal(validSignal.providerTrialEndDate, '2026-09-10');
+  assert.equal(validSignal.trialEnd, '2026-09-10T00:00:00.000Z');
+  assert.equal(validSignal.safeDeadline, '2026-09-08T00:00:00.000Z');
+
+  // Marketing date without trial/renewal context must NOT be extracted
+  const marketingSignal = extractDateSignal(
+    'Special summer offer valid through September 10, 2026. Save $800 on a new phone when you switch.',
+    received,
+    true
+  );
+  assert.equal(marketingSignal.providerTrialEndDate, undefined);
+  assert.equal(marketingSignal.trialEnd, undefined);
+  assert.equal(marketingSignal.safeDeadline, undefined);
+});
+
+test('I. NO SAFE CANCEL DEADLINES FOR POSSIBLE OR PROMOTIONAL SIGNALS', () => {
+  // Possible finding (unconfirmed subscription update)
+  const possible = classifySignal(message(
+    'Subscription update',
+    'Your account membership status has been updated. Review your details online.',
+    'billing@dropbox.com'
+  ));
+  assert.ok(possible);
+  assert.equal(possible.kind, 'POSSIBLE');
+  assert.equal(possible.safeDeadline, undefined, 'POSSIBLE signal must never have a derived safe cancel deadline');
+  assert.equal(possible.plannedExecution, undefined, 'POSSIBLE signal must never have a derived planned execution');
+
+  // Promotional finding
+  const promo = classifySignal(message(
+    'We found price drops for an item you Droplisted',
+    'Item dropped by $15 on September 10, 2026.',
+    'droplist@joinhoney.com'
+  ));
+  assert.ok(promo);
+  assert.equal(promo.kind, 'PROMOTIONAL');
+  assert.equal(promo.safeDeadline, undefined);
+  assert.equal(promo.plannedExecution, undefined);
+});
+
+test('J. GOOGLE OAUTH PROMPT INCLUDES select_account FOR RECONNECT FLOW', () => {
+  const backendIndex = fs.readFileSync('C:/Users/lexro/trialvisor/backend/index.ts', 'utf8');
+  assert.ok(
+    backendIndex.includes("prompt:'select_account consent'"),
+    'Google OAuth start must include select_account in prompt parameter'
+  );
+});
+
+test('K. V4 MIGRATION REPROCESSING SAFETY: promotional items dismissed, user-authorized records preserved', () => {
+  const backendIndex = fs.readFileSync('C:/Users/lexro/trialvisor/backend/index.ts', 'utf8');
+  assert.ok(
+    backendIndex.includes('GMAIL_PROCESSOR_VERSION=5'),
+    'GMAIL_PROCESSOR_VERSION must be incremented to 5'
+  );
+  assert.ok(
+    backendIndex.includes("if(!t.id||t.state!=='REVIEW_REQUIRED')continue;"),
+    'Migration must strictly preserve user-authorized records and only dismiss uncommitted REVIEW_REQUIRED items'
+  );
+});
+
+test('L. MIXED-CONTENT BILLING EVIDENCE: legitimate renewal notice with marketing copy remains ACTIVE', () => {
+  const res = classifySignal(message(
+    'Your subscription renews September 10 at $14.99/month. Upgrade today and save 20%.',
+    'Thank you for being a customer. Your subscription renews on September 10, 2026. You will be charged $14.99/month. Upgrade today to our premium plan and save 20% with this special offer.',
+    'billing@cloudservices.com'
+  ));
+  assert.ok(res, 'Mixed-content billing email must be detected');
+  assert.equal(res.kind, 'ACTIVE', 'Legitimate renewal must be classified as ACTIVE, not PROMOTIONAL');
+  assert.equal(res.price, 14.99, 'Must extract exact monthly recurring price');
+  assert.equal(res.providerTrialEndDate, '2026-09-10');
+  assert.equal(res.trialEnd, '2026-09-10T00:00:00.000Z');
+  assert.equal(res.safeDeadline, '2026-09-08T00:00:00.000Z');
+  assert.equal(res.plannedExecution, '2026-09-07T23:00:00.000Z');
+  assert.equal(res.confidenceBand, 'HIGH');
+  assert.equal(res.state, 'REVIEW_REQUIRED');
 });
